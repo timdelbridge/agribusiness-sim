@@ -368,7 +368,7 @@ async function handleProcessQuarter() {
 async function generateAllPdfs(quarterIndex, teamReports, marketReport) {
   const qLabel = quarterLabel(quarterIndex);
   for (let i = 0; i < teams.length; i++) {
-    const payload = { type: 'team', teamName: teams[i].name, quarterLabel: qLabel, interestScenario: market.interestScenario, report: teamReports[i] };
+    const payload = { type: 'team', teamName: teams[i].name, quarterLabel: qLabel, interestScenario: market.interestScenario, report: teamReports[i], marketReport, teams };
     PdfReports.downloadTeamReportPdf(payload);
     await new Promise(r => setTimeout(r, 200));
   }
@@ -435,7 +435,8 @@ function wireReportButtons() {
       const quarterIndex = parseInt(btn.getAttribute('data-quarter'), 10);
       const team = teams.find(t => t.id === teamId);
       const report = await FirebaseData.fetchTeamReport(market.id, teamId, quarterIndex);
-      PdfReports.downloadTeamReportPdf({ type: 'team', teamName: team.name, quarterLabel: quarterLabel(quarterIndex), interestScenario: market.interestScenario, report });
+      const marketReport = await FirebaseData.fetchMarketRound(market.id, quarterIndex);
+      PdfReports.downloadTeamReportPdf({ type: 'team', teamName: team.name, quarterLabel: quarterLabel(quarterIndex), interestScenario: market.interestScenario, report, marketReport, teams });
     };
   });
   document.querySelectorAll('[data-pdf-summary]').forEach(btn => {

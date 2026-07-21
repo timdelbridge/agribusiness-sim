@@ -55,8 +55,47 @@ function renderEmptyState(message) {
   document.getElementById('report-body').innerHTML = `<div class="card empty-state"><p>${escapeHtml(message)}</p></div>`;
 }
 
+function renderMarketShareReportHtml(marketReport, teams) {
+  const totalMarketTons = marketReport.teamSummaries.reduce((sum, ts) => sum + ts.totalSalesTons, 0);
+  return `
+    <div class="card">
+      <h2>Market Share Report</h2>
+      <table class="statement">
+        <thead><tr><th>Price Per Ton</th>${teams.map(t => `<th>${escapeHtml(t.name)}</th>`).join('')}</tr></thead>
+        <tbody>
+          ${PRODUCTS.map(p => `<tr><td>${PRODUCT_LABELS[p]}</td>${marketReport.teamSummaries.map(ts => `<td>${money(ts.prices[p])}</td>`).join('')}</tr>`).join('')}
+        </tbody>
+      </table>
+      <table class="statement" style="margin-top:16px;">
+        <thead><tr><th>Product</th><th>Avg Price</th><th>Next Qtr Min</th><th>Next Qtr Max</th><th>Wholesale</th></tr></thead>
+        <tbody>
+          ${PRODUCTS.map(p => `<tr><td>${PRODUCT_LABELS[p]}</td><td>${money(marketReport.currentAvgPrices[p])}</td><td>${money(marketReport.nextQtrPriceLimits[p].min)}</td><td>${money(marketReport.nextQtrPriceLimits[p].max)}</td><td>${money(marketReport.wholesalePrices[p])}</td></tr>`).join('')}
+        </tbody>
+      </table>
+      <table class="statement" style="margin-top:16px;">
+        <thead><tr><th>Advertising</th>${teams.map(t => `<th>${escapeHtml(t.name)}</th>`).join('')}</tr></thead>
+        <tbody><tr><td></td>${marketReport.teamSummaries.map(ts => `<td>${money(ts.advertising)}</td>`).join('')}</tr></tbody>
+      </table>
+      <table class="statement" style="margin-top:16px;">
+        <thead><tr><th>Sales by Team (Tons)</th>${teams.map(t => `<th>${escapeHtml(t.name)}</th>`).join('')}</tr></thead>
+        <tbody>
+          ${PRODUCTS.map(p => `<tr><td>${PRODUCT_LABELS[p]}</td>${marketReport.teamSummaries.map(ts => `<td>${tons(ts.salesTons[p])}</td>`).join('')}</tr>`).join('')}
+          <tr class="total-row"><td>Total</td>${marketReport.teamSummaries.map(ts => `<td>${tons(ts.totalSalesTons)}</td>`).join('')}</tr>
+        </tbody>
+      </table>
+      <table class="statement" style="margin-top:16px;">
+        <thead><tr><th>Share of Market (%)</th>${teams.map(t => `<th>${escapeHtml(t.name)}</th>`).join('')}</tr></thead>
+        <tbody>
+          ${PRODUCTS.map(p => `<tr><td>${PRODUCT_LABELS[p]}</td>${marketReport.teamSummaries.map(ts => `<td>${pct(ts.marketShare[p])}</td>`).join('')}</tr>`).join('')}
+          <tr class="total-row"><td>Total</td>${marketReport.teamSummaries.map(ts => `<td>${pct(totalMarketTons > 0 ? (ts.totalSalesTons / totalMarketTons) * 100 : 0)}</td>`).join('')}</tr>
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
 function renderTeamReport(payload) {
-  const { teamName, quarterLabel: qLabel, interestScenario, report } = payload;
+  const { teamName, quarterLabel: qLabel, interestScenario, report, marketReport, teams } = payload;
   document.getElementById('report-title').textContent = `${teamName} — Quarterly Report`;
   document.getElementById('report-subtitle').textContent = `${qLabel} • Interest Rate Scenario ${interestScenario}`;
 
@@ -188,6 +227,8 @@ function renderTeamReport(payload) {
         </tbody>
       </table>
     </div>
+
+    ${marketReport && teams ? renderMarketShareReportHtml(marketReport, teams) : ''}
   `;
 }
 
@@ -201,34 +242,7 @@ function renderInstructorSummary(payload) {
     return `<tr><td>${escapeHtml(t.name)}</td><td>${tons(r.totalSalesTons)}</td><td>${money(r.totalRevenue)}</td><td>${money(r.netProfitBeforeTax)}</td><td>${money(r.newState.cash)}</td><td>${money(r.newState.equity)}</td><td>${r.ratios.debtEquityRatio.toFixed(2)}</td></tr>`;
   }).join('');
 
-  const marketShareTables = PRODUCTS.map(p => `
-    <table class="statement" style="margin-bottom:16px;">
-      <thead><tr><th>${PRODUCT_LABELS[p]}</th><th>Price</th><th>Advertising</th><th>Tons Sold</th><th>Market Share</th><th>Price Flag</th></tr></thead>
-      <tbody>
-        ${marketReport.teamSummaries.map((ts, i) => `
-          <tr>
-            <td>${escapeHtml(teams[i].name)}</td>
-            <td>${money(ts.prices[p])}</td>
-            <td>${money(ts.advertising)}</td>
-            <td>${tons(ts.salesTons[p])}</td>
-            <td>${pct(ts.marketShare[p])}</td>
-            <td>${ts.priceViolations.some(v => v.product === p) ? '<span class="text-danger">OUT OF RANGE</span>' : 'OK'}</td>
-          </tr>
-        `).join('')}
-      </tbody>
-    </table>
-  `).join('');
-
   document.getElementById('report-body').innerHTML = `
-    <div class="card">
-      <h2>Market Prices</h2>
-      <table class="statement">
-        <thead><tr><th>Product</th><th>Wholesale</th><th>Market Avg (this qtr)</th><th>Next Qtr Min</th><th>Next Qtr Max</th></tr></thead>
-        <tbody>
-          ${PRODUCTS.map(p => `<tr><td>${PRODUCT_LABELS[p]}</td><td>${money(marketReport.wholesalePrices[p])}</td><td>${money(marketReport.currentAvgPrices[p])}</td><td>${money(marketReport.nextQtrPriceLimits[p].min)}</td><td>${money(marketReport.nextQtrPriceLimits[p].max)}</td></tr>`).join('')}
-        </tbody>
-      </table>
-    </div>
     <div class="card">
       <h2>Team Comparison</h2>
       <table class="statement">
@@ -236,10 +250,8 @@ function renderInstructorSummary(payload) {
         <tbody>${teamRows}</tbody>
       </table>
     </div>
-    <div class="card">
-      <h2>Market Share by Product</h2>
-      ${marketShareTables}
-    </div>
+
+    ${renderMarketShareReportHtml(marketReport, teams)}
   `;
 }
 
@@ -274,7 +286,8 @@ async function init() {
       const team = teams.find(t => t.id === teamId);
       const report = await FirebaseData.fetchTeamReport(marketId, teamId, quarterIndex);
       if (!report) { renderEmptyState('Report not found for that team/quarter.'); return; }
-      const payload = { type: 'team', teamName: team ? team.name : teamId, quarterLabel: qLabel, interestScenario: market.interestScenario, report };
+      const marketReport = await FirebaseData.fetchMarketRound(marketId, quarterIndex);
+      const payload = { type: 'team', teamName: team ? team.name : teamId, quarterLabel: qLabel, interestScenario: market.interestScenario, report, marketReport, teams };
       renderTeamReport(payload);
       renderDownloadButton(payload);
     } else {
