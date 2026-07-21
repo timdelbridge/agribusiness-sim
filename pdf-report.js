@@ -33,6 +33,11 @@ function pct(n) {
 function sanitizeForFilename(s) {
   return String(s).replace(/[^a-z0-9]+/gi, '_').replace(/^_+|_+$/g, '');
 }
+// Team objects differ in shape between the local-file app ({teamId, teamName})
+// and the hosted Firebase app ({id, name}) -- this file is shared by both, so
+// every place that touches a team object goes through these two helpers.
+function teamLabel(t) { return t.teamName || t.name; }
+function teamKey(t) { return t.teamId || t.id; }
 
 function teamReportFilename(payload) {
   return `TeamReport_${sanitizeForFilename(payload.teamName)}_${sanitizeForFilename(payload.quarterLabel)}.pdf`;
@@ -81,11 +86,77 @@ function stampFooters(doc) {
 }
 
 // ============================================================
+// MARKET SHARE REPORT (shared by team reports and the instructor summary --
+// matches the classic Purdue simulation manual layout: teams as columns)
+// ============================================================
+
+function addMarketShareReportSection(doc, marketReport, teams, startY) {
+  let y = addSectionTitle(doc, 'Market Share Report', startY);
+  const teamLabels = teams.map(teamLabel);
+  const totalMarketTons = marketReport.teamSummaries.reduce((sum, ts) => sum + ts.totalSalesTons, 0);
+
+  doc.autoTable({
+    ...AUTOTABLE_THEME,
+    startY: y,
+    head: [['Price Per Ton', ...teamLabels]],
+    body: PDF_PRODUCTS.map(p => [PDF_PRODUCT_LABELS[p], ...marketReport.teamSummaries.map(ts => money(ts.prices[p]))]),
+  });
+
+  y = doc.lastAutoTable.finalY + 16;
+  doc.autoTable({
+    ...AUTOTABLE_THEME,
+    startY: y,
+    head: [['Product', 'Avg Price', 'Next Qtr Min', 'Next Qtr Max', 'Wholesale']],
+    body: PDF_PRODUCTS.map(p => [
+      PDF_PRODUCT_LABELS[p],
+      money(marketReport.currentAvgPrices[p]),
+      money(marketReport.nextQtrPriceLimits[p].min),
+      money(marketReport.nextQtrPriceLimits[p].max),
+      money(marketReport.wholesalePrices[p]),
+    ]),
+  });
+
+  y = doc.lastAutoTable.finalY + 16;
+  doc.autoTable({
+    ...AUTOTABLE_THEME,
+    startY: y,
+    head: [['Advertising', ...teamLabels]],
+    body: [['', ...marketReport.teamSummaries.map(ts => money(ts.advertising))]],
+  });
+
+  y = doc.lastAutoTable.finalY + 16;
+  doc.autoTable({
+    ...AUTOTABLE_THEME,
+    startY: y,
+    head: [['Sales by Team (Tons)', ...teamLabels]],
+    body: [
+      ...PDF_PRODUCTS.map(p => [PDF_PRODUCT_LABELS[p], ...marketReport.teamSummaries.map(ts => tons(ts.salesTons[p]))]),
+      ['Total', ...marketReport.teamSummaries.map(ts => tons(ts.totalSalesTons))],
+    ],
+    didParseCell: (data) => { if (data.row.index === PDF_PRODUCTS.length) data.cell.styles.fontStyle = 'bold'; },
+  });
+
+  y = doc.lastAutoTable.finalY + 16;
+  doc.autoTable({
+    ...AUTOTABLE_THEME,
+    startY: y,
+    head: [['Share of Market (%)', ...teamLabels]],
+    body: [
+      ...PDF_PRODUCTS.map(p => [PDF_PRODUCT_LABELS[p], ...marketReport.teamSummaries.map(ts => pct(ts.marketShare[p]))]),
+      ['Total', ...marketReport.teamSummaries.map(ts => pct(totalMarketTons > 0 ? (ts.totalSalesTons / totalMarketTons) * 100 : 0))],
+    ],
+    didParseCell: (data) => { if (data.row.index === PDF_PRODUCTS.length) data.cell.styles.fontStyle = 'bold'; },
+  });
+
+  return doc.lastAutoTable.finalY;
+}
+
+// ============================================================
 // TEAM REPORT
 // ============================================================
 
 function buildTeamReportPdf(payload) {
-  const { teamName, quarterLabel, interestScenario, report } = payload;
+  const { teamName, quarterLabel, interestScenario, report, marketReport, teams } = payload;
   const headerLines = [teamName, quarterLabel, `Scenario ${interestScenario}`];
   const doc = newDoc();
 
@@ -279,6 +350,13 @@ function buildTeamReportPdf(payload) {
     ],
   });
 
+  // --- Market Share Report (only when the market-wide round data was
+  // supplied alongside this team's own report) ---
+  if (marketReport && teams) {
+    doc.addPage();
+    addMarketShareReportSection(doc, marketReport, teams, 60);
+  }
+
   const pageCount = doc.internal.getNumberOfPages();
   for (let i = 1; i <= pageCount; i++) {
     doc.setPage(i);
@@ -306,26 +384,11 @@ function buildInstructorSummaryPdf(payload) {
   doc.setTextColor(0, 0, 0);
 
   let y = 100;
-  y = addSectionTitle(doc, 'Market Prices', y);
-  doc.autoTable({
-    ...AUTOTABLE_THEME,
-    startY: y,
-    head: [['Product', 'Wholesale', 'Market Avg (this qtr)', 'Next Qtr Min', 'Next Qtr Max']],
-    body: PDF_PRODUCTS.map(p => [
-      PDF_PRODUCT_LABELS[p],
-      money(marketReport.wholesalePrices[p]),
-      money(marketReport.currentAvgPrices[p]),
-      money(marketReport.nextQtrPriceLimits[p].min),
-      money(marketReport.nextQtrPriceLimits[p].max),
-    ]),
-  });
-
-  y = doc.lastAutoTable.finalY + 20;
   y = addSectionTitle(doc, 'Team Comparison', y);
   const rows = teams.map(t => {
-    const r = teamReports[t.teamId];
+    const r = teamReports[teamKey(t)];
     return [
-      t.teamName,
+      teamLabel(t),
       tons(r.totalSalesTons),
       money(r.totalRevenue),
       money(r.netProfitBeforeTax),
@@ -341,25 +404,8 @@ function buildInstructorSummaryPdf(payload) {
     body: rows,
   });
 
-  y = doc.lastAutoTable.finalY + 20;
-  if (y > doc.internal.pageSize.getHeight() - 150) { doc.addPage(); y = 60; }
-  y = addSectionTitle(doc, 'Market Share by Product', y);
-  PDF_PRODUCTS.forEach((p) => {
-    doc.autoTable({
-      ...AUTOTABLE_THEME,
-      startY: y,
-      head: [[PDF_PRODUCT_LABELS[p], 'Price', 'Advertising', 'Tons Sold', 'Market Share', 'Price Flag']],
-      body: marketReport.teamSummaries.map((ts, i) => [
-        teams[i].teamName,
-        money(ts.prices[p]),
-        money(ts.advertising),
-        tons(ts.salesTons[p]),
-        pct(ts.marketShare[p]),
-        ts.priceViolations.some(v => v.product === p) ? 'OUT OF RANGE' : 'OK',
-      ]),
-    });
-    y = doc.lastAutoTable.finalY + 16;
-  });
+  doc.addPage();
+  addMarketShareReportSection(doc, marketReport, teams, 60);
 
   const pageCount = doc.internal.getNumberOfPages();
   for (let i = 1; i <= pageCount; i++) {
