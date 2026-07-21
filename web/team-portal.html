@@ -236,6 +236,18 @@ function renderDecisionView() {
     return;
   }
 
+  if (market.status === 'forming') {
+    el.innerHTML = `
+      <div class="card">
+        <h2>${escapeHtml(team.name)} — Waiting to Start</h2>
+        <p>Your team is set up. Decisions can't be submitted yet — your instructor needs to lock in the team roster and start the game first. Check back once they've done that.</p>
+        <button type="button" class="btn-secondary btn-sm" id="btn-switch-team">Switch Team</button>
+      </div>
+    `;
+    document.getElementById('btn-switch-team').onclick = () => { myTeamId = null; render(); };
+    return;
+  }
+
   const limits = getPriceLimits();
   const d = existingDecision;
   const priceVal = (p) => d ? d.prices[p] : teamState.prices[p];
