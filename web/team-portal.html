@@ -73,6 +73,7 @@ function renderJoinView() {
     const code = document.getElementById('join-code').value;
     if (!code.trim()) { errEl.textContent = 'Enter a join code.'; return; }
     try {
+      await FirebaseData.ensureAnonymousSession();
       const found = await FirebaseData.lookupMarketByJoinCode(code);
       if (!found) { errEl.textContent = 'No market found with that code.'; return; }
       market = found;
