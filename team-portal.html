@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agribusiness Sim — Team Portal</title>
+<link rel="stylesheet" href="../styles.css">
+</head>
+<body>
+<div class="page page--narrow" id="app-root">
+  <header class="app-header">
+    <div>
+      <h1>Team Portal</h1>
+      <div class="subtitle" id="header-subtitle">Enter your market's join code to begin.</div>
+    </div>
+  </header>
+  <div id="view-root"></div>
+</div>
+
+<script src="../simulation-engine.js"></script>
+<script type="module">
+import { FirebaseData } from "./firebase-data.js";
+
+const PRODUCT_LABELS = {
+  completeFeed: 'Complete Feed', concentrateFeed: 'Concentrate Feed',
+  commGradeFert: 'Comm. Grade Fert', customBlendFert: 'Custom Blend Fert',
+};
+const PRODUCTS = FirebaseData.PRODUCTS;
+
+let market = null;
+let teams = [];
+let myTeamId = null;
+let teamState = null;
+let existingDecision = null;
+let referenceAvgPrices = null;
+let unsubscribeMarket = null;
+
+function escapeHtml(str) {
+  return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+function quarterLabel(idx) { return `Q${(idx % 4) + 1} Year ${Math.floor(idx / 4) + 1}`; }
+function fmtMoney(n) {
+  if (typeof n !== 'number' || !Number.isFinite(n)) return '—';
+  const sign = n < 0 ? '-' : '';
+  return `${sign}$${Math.abs(n).toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+}
+
+function render() {
+  const sub = document.getElementById('header-subtitle');
+  if (!market) { sub.textContent = "Enter your market's join code to begin."; return renderJoinView(); }
+  sub.textContent = `${market.name} — ${myTeamId ? escapeHtml(teams.find(t => t.id === myTeamId)?.name || '') : 'choose your team'}`;
+  if (!myTeamId) return renderTeamSelectView();
+  return renderDecisionView();
+}
+
+// ============================================================
+// STEP 1 — JOIN MARKET
+// ============================================================
+
+function renderJoinView() {
+  document.getElementById('view-root').innerHTML = `
+    <div class="card">
+      <h2>Step 1: Enter Market Code</h2>
+      <div class="field"><label for="join-code">Join Code</label><input type="text" id="join-code" placeholder="e.g. K3XQ7M" style="text-transform:uppercase;"></div>
+      <button type="button" id="btn-join">Continue</button>
+      <p id="join-error" class="text-danger" style="margin-top:10px;"></p>
+    </div>
+  `;
+  document.getElementById('btn-join').onclick = async () => {
+    const errEl = document.getElementById('join-error');
+    errEl.textContent = '';
+    const code = document.getElementById('join-code').value;
+    if (!code.trim()) { errEl.textContent = 'Enter a join code.'; return; }
+    try {
+      await FirebaseData.ensureAnonymousSession();
+      const found = await FirebaseData.lookupMarketByJoinCode(code);
+      if (!found) { errEl.textContent = 'No market found with that code.'; return; }
+      market = found;
+      teams = await FirebaseData.listTeams(market.id);
+      const linkedTeamId = await FirebaseData.findMyLinkedTeamInMarket(market.id);
+      if (linkedTeamId) await selectTeam(linkedTeamId);
+      else render();
+      watchMarket();
+    } catch (e) { errEl.textContent = e.message; }
+  };
+}
+
+function watchMarket() {
+  if (unsubscribeMarket) unsubscribeMarket();
+  unsubscribeMarket = FirebaseData.listenToMarket(market.id, (m) => {
+    if (!m) return;
+    const quarterChanged = market.currentQuarterIndex !== m.currentQuarterIndex;
+    market = m;
+    if (myTeamId && quarterChanged) {
+      loadDecisionContext().then(render).catch((e) => {
+        console.error('Failed to refresh after quarter change:', e);
+        render();
+      });
+    } else {
+      render();
+    }
+  });
+}
+
+// ============================================================
+// STEP 2 — TEAM SELECT / CREATE
+// ============================================================
+
+function renderTeamSelectView() {
+  const formingOpen = market.status === 'forming';
+  document.getElementById('view-root').innerHTML = `
+    <div class="card">
+      <h2>Step 2: Who Are You?</h2>
+      ${teams.length > 0 ? `
+        <div class="field">
+          <label for="team-select">Your Team</label>
+          <select id="team-select">
+            <option value="">Select your team…</option>
+            ${teams.map(t => `<option value="${t.id}">${escapeHtml(t.name)}</option>`).join('')}
+          </select>
+        </div>
+        <div class="field" id="pin-field" style="display:none;">
+          <label for="team-pin">Team PIN</label>
+          <input type="text" id="team-pin" inputmode="numeric">
+        </div>
+        <button type="button" id="btn-enter-team" disabled>Enter</button>
+      ` : '<p class="text-muted">No teams have been created in this market yet.</p>'}
+      ${formingOpen ? `
+        <h3 style="margin-top:20px;">Or Create a New Team</h3>
+        <div class="field"><label for="new-team-name">Team Name</label><input type="text" id="new-team-name"></div>
+        <button type="button" class="btn-secondary" id="btn-create-team">Create Team</button>
+      ` : (teams.length === 0 ? '<p class="text-danger">Team formation has closed and no teams exist — contact your instructor.</p>' : '')}
+      <p id="team-error" class="text-danger" style="margin-top:10px;"></p>
+      <button type="button" class="btn-secondary btn-sm" id="btn-different-market" style="margin-top:10px;">Use a Different Join Code</button>
+    </div>
+  `;
+  const errEl = document.getElementById('team-error');
+
+  if (teams.length > 0) {
+    const select = document.getElementById('team-select');
+    const pinField = document.getElementById('pin-field');
+    const enterBtn = document.getElementById('btn-enter-team');
+    select.onchange = () => {
+      pinField.style.display = select.value ? '' : 'none';
+      enterBtn.disabled = !select.value;
+    };
+    enterBtn.onclick = async () => {
+      errEl.textContent = '';
+      try {
+        await FirebaseData.linkSessionToTeam(market.id, select.value, document.getElementById('team-pin').value.trim());
+        await selectTeam(select.value);
+      } catch (e) { errEl.textContent = e.message; }
+    };
+  }
+
+  const createBtn = document.getElementById('btn-create-team');
+  if (createBtn) createBtn.onclick = async () => {
+    errEl.textContent = '';
+    const name = document.getElementById('new-team-name').value.trim();
+    if (!name) { errEl.textContent = 'Enter a team name.'; return; }
+    try {
+      const { teamId, pin } = await FirebaseData.createTeam(market.id, name);
+      alert(`Your team PIN is: ${pin}\n\nWrite this down and share it with your teammates — it's the only way back into this team, and it won't be shown again.`);
+      teams = await FirebaseData.listTeams(market.id);
+      await selectTeam(teamId);
+    } catch (e) { errEl.textContent = e.message; }
+  };
+
+  document.getElementById('btn-different-market').onclick = () => {
+    if (unsubscribeMarket) unsubscribeMarket();
+    market = null; teams = []; myTeamId = null;
+    render();
+  };
+}
+
+async function selectTeam(teamId) {
+  myTeamId = teamId;
+  await loadDecisionContext();
+  render();
+}
+
+// ============================================================
+// STEP 3 — DECISION FORM
+// ============================================================
+
+async function loadDecisionContext() {
+  teamState = await FirebaseData.fetchTeamState(market.id, myTeamId);
+  if (market.status !== 'completed') {
+    existingDecision = await FirebaseData.fetchDecision(market.id, myTeamId, market.currentQuarterIndex);
+    referenceAvgPrices = market.currentQuarterIndex === 0
+      ? { ...SimEngine.STARTING_PRICES }
+      : (await FirebaseData.fetchMarketRound(market.id, market.currentQuarterIndex - 1)).currentAvgPrices;
+  }
+}
+
+function getPriceLimits() {
+  const limits = {};
+  for (const p of PRODUCTS) {
+    limits[p] = { min: referenceAvgPrices[p] - SimEngine.PRICE_RANGE, max: referenceAvgPrices[p] + SimEngine.PRICE_RANGE };
+  }
+  return limits;
+}
+
+function readFormDecision() {
+  const val = (id) => document.getElementById(id).value;
+  const num = (id) => { const n = parseFloat(val(id)); return Number.isFinite(n) ? n : 0; };
+  const prices = {}, orders = {};
+  for (const p of PRODUCTS) { prices[p] = num(`price-${p}`); orders[p] = num(`order-${p}`); }
+  return {
+    prices, orders,
+    placeEmergencyOrders: document.getElementById('place-emergency-orders').checked,
+    storageExpansionTons: num('storage-expansion'),
+    truckPurchase: num('truck-purchase'),
+    employees: num('employees'),
+    creditPolicy: parseInt(val('credit-policy'), 10),
+    advertising: num('advertising'),
+    borrow: num('borrow'),
+    repayLoan: num('repay-loan'),
+    callInvestment: num('call-investment'),
+    makeInvestment: num('make-investment'),
+  };
+}
+
+function renderDecisionView() {
+  const el = document.getElementById('view-root');
+  const team = teams.find(t => t.id === myTeamId);
+
+  if (market.status === 'completed') {
+    el.innerHTML = `
+      <div class="card">
+        <h2>${escapeHtml(team.name)} — Game Complete</h2>
+        <p>All ${market.totalQuarters} quarters have been processed. See your instructor for final reports.</p>
+      </div>
+    `;
+    return;
+  }
+
+  const limits = getPriceLimits();
+  const d = existingDecision;
+  const priceVal = (p) => d ? d.prices[p] : teamState.prices[p];
+  const orderVal = (p) => d ? d.orders[p] : 0;
+
+  el.innerHTML = `
+    <div class="card">
+      <h2>${escapeHtml(team.name)} — ${quarterLabel(market.currentQuarterIndex)}</h2>
+      <div class="grid grid--4">
+        <div><label>Cash</label><div>${fmtMoney(teamState.cash)}</div></div>
+        <div><label>Equity</label><div>${fmtMoney(teamState.equity)}</div></div>
+        <div><label>Bank Note</label><div>${fmtMoney(teamState.bankNote)}</div></div>
+        <div><label>Workers Employed</label><div>${teamState.workersEmployed}</div></div>
+      </div>
+      <h3 style="margin-top:16px;">Current Inventory</h3>
+      <table class="statement">
+        <thead><tr><th>Product</th><th>Tons on Hand</th><th>Last Price Charged</th></tr></thead>
+        <tbody>
+          ${PRODUCTS.map(p => `<tr><td>${PRODUCT_LABELS[p]}</td><td>${teamState.inventory[p].tons.toFixed(1)}</td><td>${fmtMoney(teamState.prices[p])}</td></tr>`).join('')}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>${d ? 'Your Submitted Decision' : "This Quarter's Decisions"}</h2>
+      ${d ? '<p class="text-muted">You can still edit and resubmit until the instructor processes this round.</p>' : ''}
+      <form id="decision-form">
+        <h3>Prices</h3>
+        <p class="field-hint">Must be within $${SimEngine.PRICE_RANGE.toFixed(2)} of the market average.</p>
+        <div class="grid grid--2">
+          ${PRODUCTS.map(p => `
+            <div class="field">
+              <label for="price-${p}">${PRODUCT_LABELS[p]} Price <span class="text-muted">(range ${fmtMoney(limits[p].min)} – ${fmtMoney(limits[p].max)})</span></label>
+              <input type="number" step="0.01" id="price-${p}" value="${priceVal(p).toFixed(2)}">
+            </div>
+          `).join('')}
+        </div>
+        <h3>Orders (tons)</h3>
+        <div class="grid grid--2">
+          ${PRODUCTS.map(p => `
+            <div class="field"><label for="order-${p}">${PRODUCT_LABELS[p]} Order</label><input type="number" step="1" min="0" id="order-${p}" value="${orderVal(p)}"></div>
+          `).join('')}
+        </div>
+        <div class="field">
+          <label style="display:flex; align-items:center; gap:8px; font-weight:400;">
+            <input type="checkbox" id="place-emergency-orders" ${d && d.placeEmergencyOrders ? 'checked' : ''}> Place emergency orders to cover unfilled demand (10% surcharge)
+          </label>
+        </div>
+        <h3>Operations</h3>
+        <div class="grid grid--3">
+          <div class="field"><label for="employees">Employees</label><input type="number" step="1" min="3" id="employees" value="${d ? d.employees : teamState.workersEmployed}"></div>
+          <div class="field"><label for="truck-purchase">Trucks to Purchase</label><input type="number" step="1" min="0" id="truck-purchase" value="${d ? d.truckPurchase : 0}"></div>
+          <div class="field"><label for="storage-expansion">Storage Expansion (tons)</label><input type="number" step="1" min="0" id="storage-expansion" value="${d ? d.storageExpansionTons : 0}"></div>
+        </div>
+        <h3>Marketing &amp; Credit</h3>
+        <div class="grid grid--2">
+          <div class="field"><label for="advertising">Advertising ($/quarter)</label><input type="number" step="1" min="0" id="advertising" value="${d ? d.advertising : 1000}"></div>
+          <div class="field">
+            <label for="credit-policy">Credit Policy</label>
+            <select id="credit-policy">
+              <option value="1" ${d && d.creditPolicy === 1 ? 'selected' : ''}>1 — 30-day</option>
+              <option value="2" ${d && d.creditPolicy === 2 ? 'selected' : ''}>2 — 60-day</option>
+              <option value="3" ${d && d.creditPolicy === 3 ? 'selected' : ''}>3 — 90-day</option>
+            </select>
+          </div>
+        </div>
+        <h3>Financing</h3>
+        <div class="grid grid--4">
+          <div class="field"><label for="borrow">Borrow</label><input type="number" step="1" min="0" id="borrow" value="${d ? d.borrow : 0}"></div>
+          <div class="field"><label for="repay-loan">Repay Loan</label><input type="number" step="1" min="0" id="repay-loan" value="${d ? d.repayLoan : 0}"></div>
+          <div class="field"><label for="call-investment">Call Investment</label><input type="number" step="1" min="0" id="call-investment" value="${d ? d.callInvestment : 0}"></div>
+          <div class="field"><label for="make-investment">Make Investment</label><input type="number" step="1" min="0" id="make-investment" value="${d ? d.makeInvestment : 0}"></div>
+        </div>
+      </form>
+      <div id="validation-region"></div>
+      <div class="btn-row" style="margin-top:16px;">
+        <button type="button" id="btn-submit-decision">${d ? 'Resubmit Decision' : 'Submit Decision'}</button>
+        <button type="button" class="btn-secondary btn-sm" id="btn-switch-team">Switch Team</button>
+      </div>
+      <p id="submit-status" class="text-success" style="margin-top:8px;"></p>
+    </div>
+
+    ${market.currentQuarterIndex > 0 ? renderPastReportsCard() : ''}
+  `;
+
+  document.getElementById('decision-form').addEventListener('input', updateValidation);
+  updateValidation();
+  document.getElementById('btn-submit-decision').onclick = handleSubmitDecision;
+  document.getElementById('btn-switch-team').onclick = () => { myTeamId = null; render(); };
+}
+
+function updateValidation() {
+  const decision = readFormDecision();
+  const result = SimEngine.validateDecision(decision, teamState, referenceAvgPrices);
+  const region = document.getElementById('validation-region');
+  if (result.errors.length === 0 && result.warnings.length === 0) {
+    region.innerHTML = `<p class="text-success" style="margin-top:12px;">Looks good — no issues detected.</p>`;
+    return;
+  }
+  region.innerHTML = `
+    <ul class="message-list" style="margin-top:12px;">
+      ${result.errors.map(e => `<li class="is-error">${escapeHtml(e)}</li>`).join('')}
+      ${result.warnings.map(w => `<li class="is-warning">${escapeHtml(w)}</li>`).join('')}
+    </ul>
+  `;
+}
+
+async function handleSubmitDecision() {
+  const statusEl = document.getElementById('submit-status');
+  statusEl.textContent = '';
+  statusEl.className = 'text-danger';
+  try {
+    await FirebaseData.submitDecision(market.id, myTeamId, market.currentQuarterIndex, readFormDecision());
+    existingDecision = await FirebaseData.fetchDecision(market.id, myTeamId, market.currentQuarterIndex);
+    statusEl.className = 'text-success';
+    statusEl.textContent = 'Submitted. You can still edit and resubmit until the instructor processes this round.';
+    render();
+  } catch (e) {
+    statusEl.textContent = e.message;
+  }
+}
+
+function renderPastReportsCard() {
+  const quarters = [];
+  for (let q = market.currentQuarterIndex - 1; q >= 0; q--) quarters.push(q);
+  return `
+    <div class="card">
+      <h2>Past Reports</h2>
+      ${quarters.map(q => `
+        <div class="roster-row">
+          <div>${escapeHtml(quarterLabel(q))}</div>
+          <a class="btn btn-secondary btn-sm" href="report-view.html?market=${encodeURIComponent(market.id)}&team=${encodeURIComponent(myTeamId)}&quarter=${q}" target="_blank">View Report</a>
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
+render();
+</script>
+</body>
+</html>
