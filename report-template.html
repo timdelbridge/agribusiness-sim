@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agribusiness Sim — Report</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="page" id="app-root">
+  <header class="app-header">
+    <div>
+      <h1 id="report-title">Report</h1>
+      <div class="subtitle" id="report-subtitle"></div>
+    </div>
+    <div class="btn-row no-print" id="header-actions"></div>
+  </header>
+  <div id="report-body"></div>
+</div>
+
+<script src="vendor/jspdf.umd.min.js"></script>
+<script src="vendor/jspdf.plugin.autotable.min.js"></script>
+<script src="pdf-report.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  const PRODUCT_LABELS = {
+    completeFeed: 'Complete Feed',
+    concentrateFeed: 'Concentrate Feed',
+    commGradeFert: 'Comm. Grade Fert',
+    customBlendFert: 'Custom Blend Fert',
+  };
+  const PRODUCTS = ['completeFeed', 'concentrateFeed', 'commGradeFert', 'customBlendFert'];
+
+  function money(n) {
+    if (typeof n !== 'number' || !Number.isFinite(n)) return '—';
+    const sign = n < 0 ? '-' : '';
+    return `${sign}$${Math.abs(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  }
+  function tons(n) {
+    if (typeof n !== 'number' || !Number.isFinite(n)) return '—';
+    return n.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + ' t';
+  }
+  function pct(n) {
+    if (typeof n !== 'number' || !Number.isFinite(n)) return '—';
+    return `${n.toFixed(1)}%`;
+  }
+  function escapeHtml(str) {
+    return String(str)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  function parsePayload() {
+    const hash = window.location.hash;
+    if (!hash || hash.length < 2) return null;
+    try {
+      return JSON.parse(decodeURIComponent(hash.slice(1)));
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function renderEmptyState() {
+    document.getElementById('report-subtitle').textContent = '';
+    document.getElementById('report-body').innerHTML = `
+      <div class="card empty-state">
+        <p>No report data found.</p>
+        <p class="text-muted">Open this page from the instructor dashboard's "View" or "Re-download PDF" buttons — it reads report data from the link itself.</p>
+      </div>
+    `;
+  }
+
+  function renderTeamReport(payload) {
+    const { teamName, quarterLabel, interestScenario, report } = payload;
+    document.getElementById('report-title').textContent = `${teamName} — Quarterly Report`;
+    document.getElementById('report-subtitle').textContent = `${quarterLabel} • Interest Rate Scenario ${interestScenario}`;
+
+    const s = report.newState;
+    const inventoryValue = PRODUCTS.reduce((sum, p) => sum + s.inventory[p].value, 0);
+    const totalAssets = s.cash + s.accountsReceivable + s.investments + inventoryValue + s.storageBookValue + s.truckBookValue;
+    const totalLiabilities = s.bankNote + s.emergencyLoan;
+    const exp = report.expenses;
+    const cf = report.cashFlow;
+    const util = report.utilization;
+
+    document.getElementById('report-body').innerHTML = `
+      <div class="card">
+        <h2>Income Statement</h2>
+        <table class="statement">
+          <thead><tr><th>Product</th><th>Tons Sold</th><th>Revenue</th><th>COGS</th></tr></thead>
+          <tbody>
+            ${PRODUCTS.map(p => `<tr><td>${PRODUCT_LABELS[p]}</td><td>${tons(report.actualSales[p])}</td><td>${money(report.revenue[p])}</td><td>${money(report.cogs[p])}</td></tr>`).join('')}
+            <tr class="subtotal-row"><td>Total</td><td>${tons(report.totalSalesTons)}</td><td>${money(report.totalRevenue)}</td><td>${money(report.totalCOGS)}</td></tr>
+            <tr class="total-row"><td colspan="3">Gross Margin</td><td>${money(report.grossMargin)}</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="card">
+        <h2>Operating Expenses</h2>
+        <table class="statement">
+          <tbody>
+            <tr><td>Storage — Fixed (Depreciation)</td><td>${money(exp.storageFCost)}</td></tr>
+            <tr><td>Storage — Variable</td><td>${money(exp.storageVCost)}</td></tr>
+            <tr><td>Storage — Rental</td><td>${money(exp.storageRentalCost)}</td></tr>
+            <tr><td>Truck — Fixed (Depreciation)</td><td>${money(exp.truckFCost)}</td></tr>
+            <tr><td>Truck — Variable</td><td>${money(exp.truckVCost)}</td></tr>
+            <tr><td>Truck — Rental</td><td>${money(exp.truckRentalCost)}</td></tr>
+            <tr><td>Manager Salary</td><td>${money(exp.managerSalary)}</td></tr>
+            <tr><td>Labor (incl. training)</td><td>${money(exp.laborCost)}</td></tr>
+            <tr><td>Overtime</td><td>${money(exp.overtimeCost)}</td></tr>
+            <tr><td>Bad Debt</td><td>${money(exp.badDebt)}</td></tr>
+            <tr><td>Advertising</td><td>${money(exp.advertising)}</td></tr>
+            <tr><td>Misc. Expenses</td><td>${money(exp.miscExpenses)}</td></tr>
+            <tr class="total-row"><td>Total Operating Expenses</td><td>${money(report.totalOperatingExpenses)}</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="card">
+        <h2>Net Profit Summary</h2>
+        <table class="statement">
+          <tbody>
+            <tr><td>Net Operating Profit</td><td>${money(report.netOperatingProfit)}</td></tr>
+            <tr><td>Investment Income</td><td>${money(report.investmentIncome)}</td></tr>
+            <tr><td>Interest Expense</td><td>${money(-report.interestExpense)}</td></tr>
+            <tr class="total-row"><td>Net Profit Before Tax</td><td>${money(report.netProfitBeforeTax)}</td></tr>
+            <tr><td>Gross Margin %</td><td>${pct(report.ratios.grossMarginPct)}</td></tr>
+            <tr><td>Net Profit %</td><td>${pct(report.ratios.netProfitPct)}</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="card">
+        <h2>Balance Sheet</h2>
+        <div class="grid grid--2">
+          <table class="statement">
+            <thead><tr><th colspan="2">Assets</th></tr></thead>
+            <tbody>
+              <tr><td>Cash</td><td>${money(s.cash)}</td></tr>
+              <tr><td>Accounts Receivable</td><td>${money(s.accountsReceivable)}</td></tr>
+              <tr><td>Investments</td><td>${money(s.investments)}</td></tr>
+              ${PRODUCTS.map(p => `<tr><td>Inventory — ${PRODUCT_LABELS[p]} (${tons(s.inventory[p].tons)})</td><td>${money(s.inventory[p].value)}</td></tr>`).join('')}
+              <tr><td>Storage — Net Book Value</td><td>${money(s.storageBookValue)}</td></tr>
+              <tr><td>Trucks — Net Book Value</td><td>${money(s.truckBookValue)}</td></tr>
+              <tr class="total-row"><td>Total Assets</td><td>${money(totalAssets)}</td></tr>
+            </tbody>
+          </table>
+          <table class="statement">
+            <thead><tr><th colspan="2">Liabilities &amp; Equity</th></tr></thead>
+            <tbody>
+              <tr><td>Bank Note Payable</td><td>${money(s.bankNote)}</td></tr>
+              <tr><td>Emergency Loan</td><td>${money(s.emergencyLoan)}</td></tr>
+              <tr class="subtotal-row"><td>Total Liabilities</td><td>${money(totalLiabilities)}</td></tr>
+              <tr><td>Owner's Equity</td><td>${money(s.equity)}</td></tr>
+              <tr class="total-row"><td>Total Liabilities &amp; Equity</td><td>${money(totalLiabilities + s.equity)}</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Cash Flow Statement</h2>
+        <div class="grid grid--2">
+          <table class="statement">
+            <thead><tr><th colspan="2">Cash In</th></tr></thead>
+            <tbody>
+              <tr><td>Beginning Cash</td><td>${money(cf.beginCash)}</td></tr>
+              <tr><td>Collected This Quarter</td><td>${money(cf.currentQtrCollected)}</td></tr>
+              <tr><td>Collected From Prior Quarter A/R</td><td>${money(cf.collectedFromLastQtr)}</td></tr>
+              <tr><td>Investment Income</td><td>${money(cf.investmentIncome)}</td></tr>
+              <tr><td>Borrowed</td><td>${money(cf.borrowed)}</td></tr>
+              <tr><td>Investment Called</td><td>${money(cf.investmentCalled)}</td></tr>
+              <tr class="total-row"><td>Total Cash In</td><td>${money(cf.totalCashIn)}</td></tr>
+            </tbody>
+          </table>
+          <table class="statement">
+            <thead><tr><th colspan="2">Cash Out</th></tr></thead>
+            <tbody>
+              <tr><td>Product Purchases</td><td>${money(cf.productPurchaseCost)}</td></tr>
+              <tr class="subtotal-row"><td>Total Cash Out</td><td>${money(cf.totalCashOut)}</td></tr>
+              <tr class="total-row"><td>Ending Cash</td><td>${money(cf.endCash)}</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Sales, Pricing &amp; Utilization</h2>
+        <table class="statement">
+          <thead><tr><th>Product</th><th>Your Price</th><th>Tons Sold</th><th>Tons Unfilled</th></tr></thead>
+          <tbody>
+            ${PRODUCTS.map(p => `<tr><td>${PRODUCT_LABELS[p]}</td><td>${money(s.prices[p])}</td><td>${tons(report.actualSales[p])}</td><td>${tons(report.unfilledOrders[p])}</td></tr>`).join('')}
+          </tbody>
+        </table>
+        <table class="statement" style="margin-top:12px;">
+          <tbody>
+            <tr><td>Storage Utilization</td><td>${pct(util.storageUtilization)}</td></tr>
+            <tr><td>Truck Utilization</td><td>${pct(util.truckUtilization)}</td></tr>
+            <tr><td>Labor Utilization</td><td>${pct(util.laborUtilization)}</td></tr>
+            <tr><td>Current Ratio</td><td>${report.ratios.currentRatio.toFixed(2)}</td></tr>
+            <tr><td>Debt / Equity Ratio</td><td>${report.ratios.debtEquityRatio.toFixed(2)}</td></tr>
+          </tbody>
+        </table>
+      </div>
+    `;
+  }
+
+  function renderInstructorSummary(payload) {
+    const { quarterLabel, interestScenario, teams, marketReport, teamReports } = payload;
+    document.getElementById('report-title').textContent = 'Instructor Quarterly Summary';
+    document.getElementById('report-subtitle').textContent = `${quarterLabel} • Interest Rate Scenario ${interestScenario}`;
+
+    const teamRows = teams.map(t => {
+      const r = teamReports[t.teamId];
+      return `<tr><td>${escapeHtml(t.teamName)}</td><td>${tons(r.totalSalesTons)}</td><td>${money(r.totalRevenue)}</td><td>${money(r.netProfitBeforeTax)}</td><td>${money(r.newState.cash)}</td><td>${money(r.newState.equity)}</td><td>${r.ratios.debtEquityRatio.toFixed(2)}</td></tr>`;
+    }).join('');
+
+    const marketShareTables = PRODUCTS.map(p => `
+      <table class="statement" style="margin-bottom:16px;">
+        <thead><tr><th>${PRODUCT_LABELS[p]}</th><th>Price</th><th>Advertising</th><th>Tons Sold</th><th>Market Share</th><th>Price Flag</th></tr></thead>
+        <tbody>
+          ${marketReport.teamSummaries.map((ts, i) => `
+            <tr>
+              <td>${escapeHtml(teams[i].teamName)}</td>
+              <td>${money(ts.prices[p])}</td>
+              <td>${money(ts.advertising)}</td>
+              <td>${tons(ts.salesTons[p])}</td>
+              <td>${pct(ts.marketShare[p])}</td>
+              <td>${ts.priceViolations.some(v => v.product === p) ? '<span class="text-danger">OUT OF RANGE</span>' : 'OK'}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    `).join('');
+
+    document.getElementById('report-body').innerHTML = `
+      <div class="card">
+        <h2>Market Prices</h2>
+        <table class="statement">
+          <thead><tr><th>Product</th><th>Wholesale</th><th>Market Avg (this qtr)</th><th>Next Qtr Min</th><th>Next Qtr Max</th></tr></thead>
+          <tbody>
+            ${PRODUCTS.map(p => `<tr><td>${PRODUCT_LABELS[p]}</td><td>${money(marketReport.wholesalePrices[p])}</td><td>${money(marketReport.currentAvgPrices[p])}</td><td>${money(marketReport.nextQtrPriceLimits[p].min)}</td><td>${money(marketReport.nextQtrPriceLimits[p].max)}</td></tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+
+      <div class="card">
+        <h2>Team Comparison</h2>
+        <table class="statement">
+          <thead><tr><th>Team</th><th>Tons Sold</th><th>Revenue</th><th>Net Profit</th><th>Cash</th><th>Equity</th><th>Debt/Equity</th></tr></thead>
+          <tbody>${teamRows}</tbody>
+        </table>
+      </div>
+
+      <div class="card">
+        <h2>Market Share by Product</h2>
+        ${marketShareTables}
+      </div>
+    `;
+  }
+
+  function renderDownloadButton(payload) {
+    const actions = document.getElementById('header-actions');
+    actions.innerHTML = `<button type="button" id="btn-download-pdf">Download PDF</button>`;
+    document.getElementById('btn-download-pdf').onclick = () => {
+      if (payload.type === 'team') {
+        PdfReports.downloadTeamReportPdf(payload);
+      } else {
+        PdfReports.downloadInstructorSummaryPdf(payload);
+      }
+    };
+  }
+
+  function init() {
+    const payload = parsePayload();
+    if (!payload) { renderEmptyState(); return; }
+    if (payload.type === 'team') renderTeamReport(payload);
+    else if (payload.type === 'instructor-summary') renderInstructorSummary(payload);
+    else { renderEmptyState(); return; }
+    renderDownloadButton(payload);
+  }
+
+  init();
+})();
+</script>
+</body>
+</html>

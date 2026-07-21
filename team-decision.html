@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agribusiness Sim — Team Decision Form</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="page page--narrow" id="app-root">
+  <header class="app-header">
+    <div>
+      <h1>Team Decision Form</h1>
+      <div class="subtitle" id="header-subtitle">Load this quarter's game file to begin.</div>
+    </div>
+  </header>
+  <div id="view-root"></div>
+</div>
+
+<script src="simulation-engine.js"></script>
+<script src="app.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  const PRODUCT_LABELS = {
+    completeFeed: 'Complete Feed',
+    concentrateFeed: 'Concentrate Feed',
+    commGradeFert: 'Comm. Grade Fert',
+    customBlendFert: 'Custom Blend Fert',
+  };
+  const PRODUCTS = AppState.PRODUCTS;
+
+  let loadedGameState = null;
+  let selectedTeamId = null;
+  let fileError = null;
+
+  function escapeHtml(str) {
+    return String(str)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+  function quarterLabelForIndex(idx) {
+    return `Q${(idx % 4) + 1} Year ${Math.floor(idx / 4) + 1}`;
+  }
+  function fmtMoney(n) {
+    if (typeof n !== 'number' || !Number.isFinite(n)) return '—';
+    const sign = n < 0 ? '-' : '';
+    return `${sign}$${Math.abs(n).toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+  }
+  function downloadJson(obj, filename) {
+    const blob = new Blob([JSON.stringify(obj, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  function render() {
+    const sub = document.getElementById('header-subtitle');
+    if (!loadedGameState) {
+      sub.textContent = 'Load this quarter\'s game file to begin.';
+      renderLoadView();
+    } else if (!selectedTeamId) {
+      sub.textContent = `Game ${loadedGameState.gameId} — ${quarterLabelForIndex(loadedGameState.currentQuarterIndex)}`;
+      renderTeamSelectView();
+    } else {
+      sub.textContent = `Game ${loadedGameState.gameId} — ${quarterLabelForIndex(loadedGameState.currentQuarterIndex)}`;
+      renderDecisionFormView();
+    }
+  }
+
+  // ============================================================
+  // STEP 1 — LOAD GAME FILE
+  // ============================================================
+
+  function renderLoadView() {
+    const el = document.getElementById('view-root');
+    el.innerHTML = `
+      <div class="card">
+        <h2>Step 1: Load Game File</h2>
+        <p class="text-muted">Your instructor distributes a <code>gamestate.json</code> file after each quarter. Drop this quarter's file here to see your current position, price limits, and fill out your decisions.</p>
+        <div class="dropzone" id="load-dropzone">
+          Drop <code>gamestate.json</code> here, or
+          <button type="button" class="btn-secondary btn-sm" id="btn-browse">browse files</button>
+          <input type="file" id="load-input" accept="application/json" style="display:none">
+        </div>
+        ${fileError ? `<p class="text-danger" style="margin-top:10px;">${escapeHtml(fileError)}</p>` : ''}
+      </div>
+    `;
+    const zone = document.getElementById('load-dropzone');
+    const input = document.getElementById('load-input');
+    document.getElementById('btn-browse').onclick = () => input.click();
+    input.onchange = (e) => { if (e.target.files[0]) loadFromFile(e.target.files[0]); };
+
+    ['dragenter', 'dragover'].forEach(evt => zone.addEventListener(evt, (e) => { e.preventDefault(); zone.classList.add('dropzone--active'); }));
+    ['dragleave', 'dragend', 'drop'].forEach(evt => zone.addEventListener(evt, (e) => { e.preventDefault(); zone.classList.remove('dropzone--active'); }));
+    zone.addEventListener('drop', (e) => {
+      const file = (e.dataTransfer.files || [])[0];
+      if (file) loadFromFile(file);
+    });
+  }
+
+  function loadFromFile(file) {
+    AppState.importGameStateFile(file).then((gs) => {
+      loadedGameState = gs;
+      selectedTeamId = null;
+      fileError = null;
+      render();
+    }).catch((err) => {
+      fileError = err.message;
+      render();
+    });
+  }
+
+  // ============================================================
+  // STEP 2 — SELECT TEAM
+  // ============================================================
+
+  function renderTeamSelectView() {
+    const el = document.getElementById('view-root');
+    const complete = loadedGameState.currentQuarterIndex >= loadedGameState.totalQuarters;
+
+    if (complete) {
+      el.innerHTML = `
+        <div class="card">
+          <h2>Game Complete</h2>
+          <p>This game has finished all ${loadedGameState.totalQuarters} quarters. There is no decision to submit.</p>
+          <button type="button" class="btn-secondary btn-sm" id="btn-start-over">Load a Different Game File</button>
+        </div>
+      `;
+      document.getElementById('btn-start-over').onclick = () => { loadedGameState = null; render(); };
+      return;
+    }
+
+    el.innerHTML = `
+      <div class="card">
+        <h2>Step 2: Who Are You?</h2>
+        <p class="text-muted">Submitting for ${quarterLabelForIndex(loadedGameState.currentQuarterIndex)}.</p>
+        <div class="field">
+          <label for="team-select">Your Team</label>
+          <select id="team-select">
+            <option value="">Select your team…</option>
+            ${loadedGameState.teams.map(t => `<option value="${t.teamId}">${escapeHtml(t.teamName)}</option>`).join('')}
+          </select>
+        </div>
+        <div class="btn-row">
+          <button type="button" id="btn-confirm-team" disabled>Continue</button>
+          <button type="button" class="btn-secondary btn-sm" id="btn-start-over">Load a Different Game File</button>
+        </div>
+      </div>
+    `;
+    const select = document.getElementById('team-select');
+    const confirmBtn = document.getElementById('btn-confirm-team');
+    select.onchange = () => { confirmBtn.disabled = !select.value; };
+    confirmBtn.onclick = () => { selectedTeamId = select.value; render(); };
+    document.getElementById('btn-start-over').onclick = () => { loadedGameState = null; render(); };
+  }
+
+  // ============================================================
+  // STEP 3 — DECISION FORM
+  // ============================================================
+
+  function getPriceLimits() {
+    const ref = AppState.getReferenceAvgPrices(loadedGameState);
+    const limits = {};
+    for (const p of PRODUCTS) {
+      limits[p] = { min: ref[p] - SimEngine.PRICE_RANGE, max: ref[p] + SimEngine.PRICE_RANGE, avg: ref[p] };
+    }
+    return limits;
+  }
+
+  function readFormDecision() {
+    const val = (id) => document.getElementById(id).value;
+    const num = (id) => {
+      const n = parseFloat(val(id));
+      return Number.isFinite(n) ? n : 0;
+    };
+    const prices = {}, orders = {};
+    for (const p of PRODUCTS) {
+      prices[p] = num(`price-${p}`);
+      orders[p] = num(`order-${p}`);
+    }
+    const team = loadedGameState.teams.find(t => t.teamId === selectedTeamId);
+    return {
+      gameId: loadedGameState.gameId,
+      teamId: selectedTeamId,
+      teamName: team.teamName,
+      quarterIndex: loadedGameState.currentQuarterIndex,
+      prices,
+      orders,
+      placeEmergencyOrders: document.getElementById('place-emergency-orders').checked,
+      storageExpansionTons: num('storage-expansion'),
+      truckPurchase: num('truck-purchase'),
+      employees: num('employees'),
+      creditPolicy: parseInt(val('credit-policy'), 10),
+      advertising: num('advertising'),
+      borrow: num('borrow'),
+      repayLoan: num('repay-loan'),
+      callInvestment: num('call-investment'),
+      makeInvestment: num('make-investment'),
+    };
+  }
+
+  function renderDecisionFormView() {
+    const el = document.getElementById('view-root');
+    const team = loadedGameState.teams.find(t => t.teamId === selectedTeamId);
+    const state = loadedGameState.teamStates[selectedTeamId];
+    const limits = getPriceLimits();
+    const quarterIndex = loadedGameState.currentQuarterIndex;
+
+    el.innerHTML = `
+      <div class="card">
+        <h2>${escapeHtml(team.teamName)} — ${quarterLabelForIndex(quarterIndex)}</h2>
+        <div class="grid grid--4">
+          <div><label>Cash</label><div>${fmtMoney(state.cash)}</div></div>
+          <div><label>Equity</label><div>${fmtMoney(state.equity)}</div></div>
+          <div><label>Bank Note</label><div>${fmtMoney(state.bankNote)}</div></div>
+          <div><label>Workers Employed</label><div>${state.workersEmployed}</div></div>
+        </div>
+        <h3 style="margin-top:16px;">Current Inventory</h3>
+        <table class="statement">
+          <thead><tr><th>Product</th><th>Tons on Hand</th><th>Last Price Charged</th></tr></thead>
+          <tbody>
+            ${PRODUCTS.map(p => `<tr><td>${PRODUCT_LABELS[p]}</td><td>${state.inventory[p].tons.toFixed(1)}</td><td>${fmtMoney(state.prices[p])}</td></tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+
+      <div class="card">
+        <h2>Step 3: This Quarter's Decisions</h2>
+        <form id="decision-form">
+          <h3>Prices</h3>
+          <p class="field-hint">Must be within $${SimEngine.PRICE_RANGE.toFixed(2)} of the market average. Limits below are estimated from last quarter's actual average (final limits are set once all teams submit).</p>
+          <div class="grid grid--2">
+            ${PRODUCTS.map(p => `
+              <div class="field">
+                <label for="price-${p}">${PRODUCT_LABELS[p]} Price <span class="text-muted">(range ${fmtMoney(limits[p].min)} – ${fmtMoney(limits[p].max)})</span></label>
+                <input type="number" step="0.01" id="price-${p}" value="${state.prices[p].toFixed(2)}">
+              </div>
+            `).join('')}
+          </div>
+
+          <h3>Orders (tons)</h3>
+          <div class="grid grid--2">
+            ${PRODUCTS.map(p => `
+              <div class="field">
+                <label for="order-${p}">${PRODUCT_LABELS[p]} Order</label>
+                <input type="number" step="1" min="0" id="order-${p}" value="0">
+              </div>
+            `).join('')}
+          </div>
+          <div class="field">
+            <label style="display:flex; align-items:center; gap:8px; font-weight:400;">
+              <input type="checkbox" id="place-emergency-orders"> Place emergency orders to cover unfilled demand (10% surcharge)
+            </label>
+          </div>
+
+          <h3>Operations</h3>
+          <div class="grid grid--3">
+            <div class="field"><label for="employees">Employees</label><input type="number" step="1" min="${SimEngine.MIN_WORKERS || 3}" id="employees" value="${state.workersEmployed}"></div>
+            <div class="field"><label for="truck-purchase">Trucks to Purchase</label><input type="number" step="1" min="0" id="truck-purchase" value="0"></div>
+            <div class="field"><label for="storage-expansion">Storage Expansion (tons)</label><input type="number" step="1" min="0" id="storage-expansion" value="0"></div>
+          </div>
+
+          <h3>Marketing &amp; Credit</h3>
+          <div class="grid grid--2">
+            <div class="field"><label for="advertising">Advertising ($/quarter)</label><input type="number" step="1" min="0" id="advertising" value="1000"></div>
+            <div class="field">
+              <label for="credit-policy">Credit Policy</label>
+              <select id="credit-policy">
+                <option value="1">1 — 30-day</option>
+                <option value="2">2 — 60-day</option>
+                <option value="3">3 — 90-day</option>
+              </select>
+            </div>
+          </div>
+
+          <h3>Financing</h3>
+          <div class="grid grid--4">
+            <div class="field"><label for="borrow">Borrow</label><input type="number" step="1" min="0" id="borrow" value="0"></div>
+            <div class="field"><label for="repay-loan">Repay Loan</label><input type="number" step="1" min="0" id="repay-loan" value="0"></div>
+            <div class="field"><label for="call-investment">Call Investment</label><input type="number" step="1" min="0" id="call-investment" value="0"></div>
+            <div class="field"><label for="make-investment">Make Investment</label><input type="number" step="1" min="0" id="make-investment" value="0"></div>
+          </div>
+        </form>
+
+        <div id="validation-region"></div>
+
+        <div class="btn-row" style="margin-top:16px;">
+          <button type="button" id="btn-download-decision">Download Decision File</button>
+          <button type="button" class="btn-secondary btn-sm" id="btn-change-team">Change Team</button>
+        </div>
+        <p class="field-hint">After downloading, upload the file to your team's Box folder for the instructor to collect.</p>
+      </div>
+    `;
+
+    const form = document.getElementById('decision-form');
+    form.addEventListener('input', updateValidation);
+    updateValidation();
+
+    document.getElementById('btn-download-decision').onclick = () => {
+      const decision = readFormDecision();
+      downloadJson(decision, `decision_${selectedTeamId}_Q${quarterIndex}.json`);
+    };
+    document.getElementById('btn-change-team').onclick = () => { selectedTeamId = null; render(); };
+  }
+
+  function updateValidation() {
+    const decision = readFormDecision();
+    const state = loadedGameState.teamStates[selectedTeamId];
+    const refPrices = AppState.getReferenceAvgPrices(loadedGameState);
+    const result = SimEngine.validateDecision(decision, state, refPrices);
+    const region = document.getElementById('validation-region');
+    if (result.errors.length === 0 && result.warnings.length === 0) {
+      region.innerHTML = `<p class="text-success" style="margin-top:12px;">Looks good — no issues detected.</p>`;
+      return;
+    }
+    region.innerHTML = `
+      <ul class="message-list" style="margin-top:12px;">
+        ${result.errors.map(e => `<li class="is-error">${escapeHtml(e)}</li>`).join('')}
+        ${result.warnings.map(w => `<li class="is-warning">${escapeHtml(w)}</li>`).join('')}
+      </ul>
+    `;
+  }
+
+  render();
+})();
+</script>
+</body>
+</html>

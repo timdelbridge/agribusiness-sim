@@ -1,0 +1,102 @@
+{
+  "schemaVersion": 1,
+  "gameId": "g_sample_1784652219301",
+  "createdAt": "2026-07-21T16:43:39.301Z",
+  "interestScenario": "A",
+  "totalQuarters": 12,
+  "teams": [
+    { "teamId": "team1", "teamName": "Riverbend Co-op" },
+    { "teamId": "team2", "teamName": "Prairie Farms" },
+    { "teamId": "team3", "teamName": "Sunrise Agri" },
+    { "teamId": "team4", "teamName": "Heartland Growers" }
+  ],
+  "teamStates": {
+    "team1": {
+      "cash": 3056,
+      "accountsReceivable": 155643,
+      "investments": 30000,
+      "inventory": {
+        "completeFeed": { "tons": 124.63, "value": 19940 },
+        "concentrateFeed": { "tons": 24.87, "value": 6292 },
+        "commGradeFert": { "tons": 195.23, "value": 18156 },
+        "customBlendFert": { "tons": 0, "value": 0 }
+      },
+      "storageBookValue": 297360,
+      "storageSqft": 14000,
+      "truckBookValue": 105000,
+      "trucksOwned": 5,
+      "bankNote": 275000,
+      "emergencyLoan": 0,
+      "originalLoanPrincipal": 275000,
+      "equity": 360447,
+      "workersEmployed": 7,
+      "prices": { "completeFeed": 206, "concentrateFeed": 315, "commGradeFert": 138, "customBlendFert": 159 }
+    },
+    "team2": {
+      "cash": 3056,
+      "accountsReceivable": 155643,
+      "investments": 30000,
+      "inventory": {
+        "completeFeed": { "tons": 124.63, "value": 19940 },
+        "concentrateFeed": { "tons": 24.87, "value": 6292 },
+        "commGradeFert": { "tons": 195.23, "value": 18156 },
+        "customBlendFert": { "tons": 0, "value": 0 }
+      },
+      "storageBookValue": 297360,
+      "storageSqft": 14000,
+      "truckBookValue": 105000,
+      "trucksOwned": 5,
+      "bankNote": 275000,
+      "emergencyLoan": 0,
+      "originalLoanPrincipal": 275000,
+      "equity": 360447,
+      "workersEmployed": 7,
+      "prices": { "completeFeed": 206, "concentrateFeed": 315, "commGradeFert": 138, "customBlendFert": 159 }
+    },
+    "team3": {
+      "cash": 3056,
+      "accountsReceivable": 155643,
+      "investments": 30000,
+      "inventory": {
+        "completeFeed": { "tons": 124.63, "value": 19940 },
+        "concentrateFeed": { "tons": 24.87, "value": 6292 },
+        "commGradeFert": { "tons": 195.23, "value": 18156 },
+        "customBlendFert": { "tons": 0, "value": 0 }
+      },
+      "storageBookValue": 297360,
+      "storageSqft": 14000,
+      "truckBookValue": 105000,
+      "trucksOwned": 5,
+      "bankNote": 275000,
+      "emergencyLoan": 0,
+      "originalLoanPrincipal": 275000,
+      "equity": 360447,
+      "workersEmployed": 7,
+      "prices": { "completeFeed": 206, "concentrateFeed": 315, "commGradeFert": 138, "customBlendFert": 159 }
+    },
+    "team4": {
+      "cash": 3056,
+      "accountsReceivable": 155643,
+      "investments": 30000,
+      "inventory": {
+        "completeFeed": { "tons": 124.63, "value": 19940 },
+        "concentrateFeed": { "tons": 24.87, "value": 6292 },
+        "commGradeFert": { "tons": 195.23, "value": 18156 },
+        "customBlendFert": { "tons": 0, "value": 0 }
+      },
+      "storageBookValue": 297360,
+      "storageSqft": 14000,
+      "truckBookValue": 105000,
+      "trucksOwned": 5,
+      "bankNote": 275000,
+      "emergencyLoan": 0,
+      "originalLoanPrincipal": 275000,
+      "equity": 360447,
+      "workersEmployed": 7,
+      "prices": { "completeFeed": 206, "concentrateFeed": 315, "commGradeFert": 138, "customBlendFert": 159 }
+    }
+  },
+  "currentQuarterIndex": 0,
+  "pendingDecisions": {},
+  "history": []
+}

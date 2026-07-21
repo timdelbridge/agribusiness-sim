@@ -1,0 +1,528 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agribusiness Sim — Instructor Dashboard</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="page" id="app-root">
+
+  <header class="app-header">
+    <div>
+      <h1>Agribusiness Sim — Instructor Dashboard</h1>
+      <div class="subtitle" id="header-subtitle">Loading…</div>
+    </div>
+    <div class="btn-row no-print" id="header-actions"></div>
+  </header>
+
+  <div id="file-issues-region"></div>
+
+  <div id="setup-view"></div>
+  <div id="game-view"></div>
+
+</div>
+
+<script src="simulation-engine.js"></script>
+<script src="app.js"></script>
+<script src="vendor/jspdf.umd.min.js"></script>
+<script src="vendor/jspdf.plugin.autotable.min.js"></script>
+<script src="pdf-report.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  const PRODUCT_LABELS = {
+    completeFeed: 'Complete Feed',
+    concentrateFeed: 'Concentrate Feed',
+    commGradeFert: 'Comm. Grade Fert',
+    customBlendFert: 'Custom Blend Fert',
+  };
+  const PRODUCTS = AppState.PRODUCTS;
+
+  let gameState = AppState.loadGameState();
+  let recentFileIssues = []; // [{ fileName, errors }] — not tied to a known team/roster row
+  let lastProcessedQuarterIndex = null; // set right after a successful process, for the results panel
+  let pdfGenerationStatus = 'done'; // 'generating' | 'done' — drives the results-card message
+  let teamNameInputCount = 4;
+
+  function escapeHtml(str) {
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  function quarterLabelForIndex(idx) {
+    return `Q${(idx % 4) + 1} Year ${Math.floor(idx / 4) + 1}`;
+  }
+
+  function fmtMoney(n) {
+    if (typeof n !== 'number' || !Number.isFinite(n)) return '—';
+    const sign = n < 0 ? '-' : '';
+    return `${sign}$${Math.abs(n).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+  }
+
+  // ============================================================
+  // TOP-LEVEL RENDER
+  // ============================================================
+
+  function render() {
+    renderHeader();
+    renderFileIssues();
+    if (!gameState) {
+      document.getElementById('setup-view').style.display = '';
+      document.getElementById('game-view').style.display = 'none';
+      renderSetupView();
+    } else {
+      document.getElementById('setup-view').style.display = 'none';
+      document.getElementById('game-view').style.display = '';
+      renderGameView();
+    }
+  }
+
+  function renderHeader() {
+    const sub = document.getElementById('header-subtitle');
+    const actions = document.getElementById('header-actions');
+    if (!gameState) {
+      sub.textContent = 'Set up a new game to begin.';
+      actions.innerHTML = '';
+      return;
+    }
+    const complete = gameState.currentQuarterIndex >= gameState.totalQuarters;
+    sub.textContent = complete
+      ? `Game ${gameState.gameId} — Scenario ${gameState.interestScenario} — Complete (${gameState.totalQuarters} quarters processed)`
+      : `Game ${gameState.gameId} — Scenario ${gameState.interestScenario} — ${quarterLabelForIndex(gameState.currentQuarterIndex)} (quarter ${gameState.currentQuarterIndex + 1} of ${gameState.totalQuarters})`;
+
+    actions.innerHTML = `
+      <button type="button" class="btn-secondary btn-sm" id="btn-export-state">Export gamestate.json</button>
+      <button type="button" class="btn-secondary btn-sm" id="btn-load-state">Load a gamestate.json…</button>
+      <input type="file" id="load-state-input" accept="application/json" style="display:none">
+      <button type="button" class="btn-danger btn-sm" id="btn-new-game">Start New Game</button>
+    `;
+    document.getElementById('btn-export-state').onclick = () => AppState.exportGameStateFile(gameState);
+    document.getElementById('btn-load-state').onclick = () => document.getElementById('load-state-input').click();
+    document.getElementById('load-state-input').onchange = handleLoadStateFile;
+    document.getElementById('btn-new-game').onclick = handleStartNewGameClick;
+  }
+
+  function renderFileIssues() {
+    const region = document.getElementById('file-issues-region');
+    if (recentFileIssues.length === 0) { region.innerHTML = ''; return; }
+    region.innerHTML = `
+      <div class="card no-print">
+        <h3>File Issues</h3>
+        ${recentFileIssues.map((issue, i) => `
+          <div style="margin-bottom:10px;">
+            <strong>${escapeHtml(issue.fileName)}</strong>
+            <ul class="message-list">
+              ${issue.errors.map(e => `<li class="is-error">${escapeHtml(e)}</li>`).join('')}
+            </ul>
+          </div>
+        `).join('')}
+        <button type="button" class="btn-secondary btn-sm" id="btn-dismiss-issues">Dismiss</button>
+      </div>
+    `;
+    document.getElementById('btn-dismiss-issues').onclick = () => {
+      recentFileIssues = [];
+      render();
+    };
+  }
+
+  // ============================================================
+  // SETUP VIEW
+  // ============================================================
+
+  function renderSetupView() {
+    const el = document.getElementById('setup-view');
+    el.innerHTML = `
+      <div class="card">
+        <h2>Start a New Game</h2>
+        <div class="field">
+          <label for="team-count">Number of Teams (2–6)</label>
+          <input type="number" id="team-count" min="2" max="6" value="${teamNameInputCount}">
+        </div>
+        <div class="grid grid--2" id="team-name-inputs"></div>
+
+        <fieldset>
+          <legend>Interest Rate Scenario</legend>
+          <div class="radio-row">
+            <label><input type="radio" name="scenario" value="A" checked> A (Low: 6–8%)</label>
+            <label><input type="radio" name="scenario" value="B"> B (Moderate: 8–11%)</label>
+            <label><input type="radio" name="scenario" value="C"> C (High: 10–13%)</label>
+          </div>
+        </fieldset>
+
+        <div class="btn-row">
+          <button type="button" id="btn-start-game">Start Game</button>
+        </div>
+        <p id="setup-error" class="text-danger" style="margin-top:10px;"></p>
+      </div>
+
+      <div class="card">
+        <h2>Resume an Existing Game</h2>
+        <p class="text-muted">Drag in a previously exported <code>gamestate.json</code> file to continue a game on this computer.</p>
+        <div class="dropzone" id="resume-dropzone">
+          Drop <code>gamestate.json</code> here, or
+          <button type="button" class="btn-secondary btn-sm" id="btn-resume-browse">browse files</button>
+          <input type="file" id="resume-input" accept="application/json" style="display:none">
+        </div>
+      </div>
+    `;
+    renderTeamNameInputs();
+    document.getElementById('team-count').oninput = (e) => {
+      teamNameInputCount = Math.min(6, Math.max(2, parseInt(e.target.value, 10) || 2));
+      renderTeamNameInputs();
+    };
+    document.getElementById('btn-start-game').onclick = handleStartGame;
+
+    const resumeZone = document.getElementById('resume-dropzone');
+    const resumeInput = document.getElementById('resume-input');
+    document.getElementById('btn-resume-browse').onclick = () => resumeInput.click();
+    resumeInput.onchange = (e) => { if (e.target.files[0]) loadStateFromFile(e.target.files[0]); };
+    wireDropzone(resumeZone, (files) => { if (files[0]) loadStateFromFile(files[0]); });
+  }
+
+  function renderTeamNameInputs() {
+    const wrap = document.getElementById('team-name-inputs');
+    const existing = Array.from(wrap.querySelectorAll('input')).map(i => i.value);
+    let html = '';
+    for (let i = 0; i < teamNameInputCount; i++) {
+      const val = existing[i] ? escapeHtml(existing[i]) : '';
+      html += `
+        <div class="field">
+          <label for="team-name-${i}">Team ${i + 1} Name</label>
+          <input type="text" id="team-name-${i}" placeholder="Team ${i + 1}" value="${val}">
+        </div>
+      `;
+    }
+    wrap.innerHTML = html;
+  }
+
+  function handleStartGame() {
+    const errEl = document.getElementById('setup-error');
+    errEl.textContent = '';
+    const teamNames = [];
+    for (let i = 0; i < teamNameInputCount; i++) {
+      const input = document.getElementById(`team-name-${i}`);
+      teamNames.push(input.value.trim() || `Team ${i + 1}`);
+    }
+    const scenario = document.querySelector('input[name="scenario"]:checked').value;
+    try {
+      gameState = AppState.createNewGame({ teamNames, interestScenario: scenario });
+      AppState.saveGameState(gameState);
+      AppState.exportGameStateFile(gameState);
+      lastProcessedQuarterIndex = null;
+      render();
+    } catch (e) {
+      errEl.textContent = e.message;
+    }
+  }
+
+  function handleStartNewGameClick() {
+    if (confirm('Start a new game? This will replace the current in-progress game in this browser (export a gamestate.json first if you want to keep it).')) {
+      AppState.clearGameState();
+      gameState = null;
+      lastProcessedQuarterIndex = null;
+      recentFileIssues = [];
+      render();
+    }
+  }
+
+  function handleLoadStateFile(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    if (gameState && !confirm('Loading a gamestate.json will replace the current in-progress game in this browser. Continue?')) {
+      return;
+    }
+    loadStateFromFile(file);
+  }
+
+  function loadStateFromFile(file) {
+    AppState.importGameStateFile(file).then((loaded) => {
+      gameState = loaded;
+      AppState.saveGameState(gameState);
+      lastProcessedQuarterIndex = null;
+      recentFileIssues = [];
+      render();
+    }).catch((err) => {
+      recentFileIssues = [{ fileName: file.name, errors: [err.message] }];
+      render();
+    });
+  }
+
+  // ============================================================
+  // GAME VIEW
+  // ============================================================
+
+  function renderGameView() {
+    const el = document.getElementById('game-view');
+    const complete = gameState.currentQuarterIndex >= gameState.totalQuarters;
+
+    let html = '';
+
+    if (!complete) {
+      html += renderDecisionCollectionCard();
+    } else {
+      html += `
+        <div class="card">
+          <h2>Game Complete</h2>
+          <p>All ${gameState.totalQuarters} quarters have been processed. Reports for every quarter remain available below.</p>
+        </div>
+      `;
+    }
+
+    if (lastProcessedQuarterIndex !== null) {
+      html += renderResultsCard(lastProcessedQuarterIndex);
+    }
+
+    html += renderHistoryCard();
+
+    el.innerHTML = html;
+    wireGameViewEvents();
+  }
+
+  function renderDecisionCollectionCard() {
+    const displayValidation = getDisplayValidation();
+    const submittedCount = gameState.teams.filter(t => !!gameState.pendingDecisions[t.teamId]).length;
+    const allIn = AppState.allTeamsSubmitted(gameState);
+    const hasErrors = allIn && Object.values(displayValidation || {}).some(v => v.errors.length > 0);
+
+    return `
+      <div class="card">
+        <h2>Collect Team Decisions — ${quarterLabelForIndex(gameState.currentQuarterIndex)}</h2>
+        <p class="text-muted">Drag in each team's decision JSON file (exported from team-decision.html). ${submittedCount} of ${gameState.teams.length} teams submitted.</p>
+
+        <div class="dropzone" id="decision-dropzone">
+          Drop decision file(s) here, or
+          <button type="button" class="btn-secondary btn-sm" id="btn-decision-browse">browse files</button>
+          <input type="file" id="decision-input" accept="application/json" multiple style="display:none">
+        </div>
+
+        <div style="margin-top:16px;">
+          ${gameState.teams.map(t => renderRosterRow(t, displayValidation ? displayValidation[t.teamId] : null)).join('')}
+        </div>
+
+        <div class="btn-row" style="margin-top:16px;">
+          ${hasErrors ? `
+            <label style="display:flex; align-items:center; gap:8px; font-weight:400;">
+              <input type="checkbox" id="chk-override-errors"> Process anyway despite flagged errors above
+            </label>
+          ` : ''}
+          <button type="button" id="btn-process-quarter" ${allIn ? '' : 'disabled'}>Approve &amp; Process Quarter</button>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderRosterRow(team, validation) {
+    const submitted = !!gameState.pendingDecisions[team.teamId];
+    let badgeClass = 'badge--not-submitted';
+    let badgeText = 'Not Submitted';
+    if (submitted) {
+      if (validation && validation.errors.length > 0) { badgeClass = 'badge--error'; badgeText = `${validation.errors.length} Error(s)`; }
+      else if (validation && validation.warnings.length > 0) { badgeClass = 'badge--warning'; badgeText = `${validation.warnings.length} Warning(s)`; }
+      else { badgeClass = 'badge--clean'; badgeText = 'Ready'; }
+    }
+    const messages = validation ? [
+      ...validation.errors.map(m => ({ text: m, cls: 'is-error' })),
+      ...validation.warnings.map(m => ({ text: m, cls: 'is-warning' })),
+    ] : [];
+
+    return `
+      <div class="roster-row">
+        <div style="flex:1;">
+          <span class="team-name">${escapeHtml(team.teamName)}</span>
+          ${messages.length > 0 ? `<ul class="message-list">${messages.map(m => `<li class="${m.cls}">${escapeHtml(m.text)}</li>`).join('')}</ul>` : ''}
+        </div>
+        <span class="badge ${badgeClass}">${badgeText}</span>
+        ${submitted ? `<button type="button" class="btn-secondary btn-sm" data-remove-team="${team.teamId}">Remove</button>` : ''}
+      </div>
+    `;
+  }
+
+  function getDisplayValidation() {
+    if (AppState.allTeamsSubmitted(gameState)) {
+      return AppState.validateAllPendingDecisions(gameState);
+    }
+    const refPrices = AppState.getReferenceAvgPrices(gameState);
+    const results = {};
+    gameState.teams.forEach(t => {
+      const decision = gameState.pendingDecisions[t.teamId];
+      if (!decision) return;
+      results[t.teamId] = SimEngine.validateDecision(decision, gameState.teamStates[t.teamId], refPrices);
+    });
+    return results;
+  }
+
+  function renderResultsCard(quarterIndex) {
+    const historyEntry = gameState.history.find(h => h.quarterIndex === quarterIndex);
+    if (!historyEntry) return '';
+    if (pdfGenerationStatus === 'generating') {
+      return `
+        <div class="card">
+          <h2>Quarter Processed: ${escapeHtml(historyEntry.quarterLabel)}</h2>
+          <p class="text-muted">gamestate.json exported. Generating PDF reports for all teams — files will download automatically…</p>
+        </div>
+      `;
+    }
+    return `
+      <div class="card">
+        <h2>Quarter Processed: ${escapeHtml(historyEntry.quarterLabel)}</h2>
+        <p class="text-success">gamestate.json exported. PDF reports downloaded for every team, plus the instructor summary. Attach these to an email to each team.</p>
+        <p class="text-muted" style="font-size:0.85rem;">Need to re-send or view one again? Use the buttons below.</p>
+        <div class="btn-row">
+          ${gameState.teams.map(t => `<button type="button" class="btn-secondary btn-sm" data-pdf-team="${t.teamId}" data-quarter="${quarterIndex}">Re-download ${escapeHtml(t.teamName)} PDF</button>`).join('')}
+          <button type="button" class="btn-secondary btn-sm" data-pdf-summary data-quarter="${quarterIndex}">Re-download Instructor Summary PDF</button>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderHistoryCard() {
+    if (gameState.history.length === 0) return '';
+    const entries = [...gameState.history].reverse();
+    return `
+      <div class="card">
+        <h2>Quarter History</h2>
+        ${entries.map(h => `
+          <div class="roster-row">
+            <div><strong>${escapeHtml(h.quarterLabel)}</strong></div>
+            <div class="btn-row">
+              ${gameState.teams.map(t => `<button type="button" class="btn-secondary btn-sm" data-pdf-team="${t.teamId}" data-quarter="${h.quarterIndex}">${escapeHtml(t.teamName)} PDF</button>`).join('')}
+              <button type="button" class="btn-secondary btn-sm" data-pdf-summary data-quarter="${h.quarterIndex}">Summary PDF</button>
+              ${gameState.teams.map(t => `<button type="button" class="btn-secondary btn-sm" data-view-team="${t.teamId}" data-quarter="${h.quarterIndex}">View ${escapeHtml(t.teamName)}</button>`).join('')}
+              <button type="button" class="btn-secondary btn-sm" data-view-summary data-quarter="${h.quarterIndex}">View Summary</button>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    `;
+  }
+
+  function wireGameViewEvents() {
+    const dropzone = document.getElementById('decision-dropzone');
+    const fileInput = document.getElementById('decision-input');
+    if (dropzone) {
+      document.getElementById('btn-decision-browse').onclick = () => fileInput.click();
+      fileInput.onchange = (e) => handleDecisionFiles(Array.from(e.target.files));
+      wireDropzone(dropzone, handleDecisionFiles);
+    }
+
+    document.querySelectorAll('[data-remove-team]').forEach(btn => {
+      btn.onclick = () => {
+        delete gameState.pendingDecisions[btn.getAttribute('data-remove-team')];
+        AppState.saveGameState(gameState);
+        render();
+      };
+    });
+
+    const processBtn = document.getElementById('btn-process-quarter');
+    if (processBtn) processBtn.onclick = handleProcessQuarter;
+
+    document.querySelectorAll('[data-pdf-team]').forEach(btn => {
+      btn.onclick = () => {
+        const teamId = btn.getAttribute('data-pdf-team');
+        const quarterIndex = parseInt(btn.getAttribute('data-quarter'), 10);
+        PdfReports.downloadTeamReportPdf(AppState.buildReportPayload(gameState, teamId, quarterIndex));
+      };
+    });
+    document.querySelectorAll('[data-pdf-summary]').forEach(btn => {
+      btn.onclick = () => {
+        const quarterIndex = parseInt(btn.getAttribute('data-quarter'), 10);
+        PdfReports.downloadInstructorSummaryPdf(AppState.buildInstructorSummaryPayload(gameState, quarterIndex));
+      };
+    });
+    document.querySelectorAll('[data-view-team]').forEach(btn => {
+      btn.onclick = () => {
+        const teamId = btn.getAttribute('data-view-team');
+        const quarterIndex = parseInt(btn.getAttribute('data-quarter'), 10);
+        AppState.openReport(AppState.buildReportPayload(gameState, teamId, quarterIndex));
+      };
+    });
+    document.querySelectorAll('[data-view-summary]').forEach(btn => {
+      btn.onclick = () => {
+        const quarterIndex = parseInt(btn.getAttribute('data-quarter'), 10);
+        AppState.openReport(AppState.buildInstructorSummaryPayload(gameState, quarterIndex));
+      };
+    });
+  }
+
+  function handleDecisionFiles(files) {
+    const jsonFiles = files.filter(f => f.name.toLowerCase().endsWith('.json'));
+    Promise.all(jsonFiles.map(f => AppState.parseDecisionFile(f, gameState).then(result => ({ file: f, result }))))
+      .then((outcomes) => {
+        const newIssues = [];
+        outcomes.forEach(({ file, result }) => {
+          if (result.ok) {
+            gameState.pendingDecisions[result.decision.teamId] = result.decision;
+          } else {
+            newIssues.push({ fileName: file.name, errors: result.errors });
+          }
+        });
+        if (newIssues.length > 0) recentFileIssues = newIssues;
+        AppState.saveGameState(gameState);
+        render();
+      });
+  }
+
+  async function handleProcessQuarter() {
+    const displayValidation = AppState.validateAllPendingDecisions(gameState);
+    const hasErrors = Object.values(displayValidation || {}).some(v => v.errors.length > 0);
+    if (hasErrors) {
+      const override = document.getElementById('chk-override-errors');
+      if (!override || !override.checked) {
+        alert('Resolve the flagged errors, or check "Process anyway" to override.');
+        return;
+      }
+    }
+    const quarterIndex = gameState.currentQuarterIndex;
+    try {
+      AppState.processCurrentQuarter(gameState);
+      AppState.exportGameStateFile(gameState);
+      lastProcessedQuarterIndex = quarterIndex;
+      pdfGenerationStatus = 'generating';
+      render();
+      await PdfReports.generateAllReportPdfs(gameState, quarterIndex);
+      pdfGenerationStatus = 'done';
+      render();
+    } catch (e) {
+      pdfGenerationStatus = 'done';
+      alert(`Could not process quarter: ${e.message}`);
+      render();
+    }
+  }
+
+  // ============================================================
+  // DROPZONE HELPER (shared drag/drop wiring)
+  // ============================================================
+
+  function wireDropzone(el, onFiles) {
+    ['dragenter', 'dragover'].forEach(evt => {
+      el.addEventListener(evt, (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        el.classList.add('dropzone--active');
+      });
+    });
+    ['dragleave', 'dragend', 'drop'].forEach(evt => {
+      el.addEventListener(evt, (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        el.classList.remove('dropzone--active');
+      });
+    });
+    el.addEventListener('drop', (e) => {
+      const files = Array.from(e.dataTransfer.files || []);
+      if (files.length > 0) onFiles(files);
+    });
+  }
+
+  render();
+})();
+</script>
+</body>
+</html>

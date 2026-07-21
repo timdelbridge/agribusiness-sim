@@ -1,0 +1,140 @@
+rules_version = '2';
+
+// Agribusiness Sim — Firestore Security Rules
+//
+// Model in one paragraph: instructors are real Firebase Auth users who own
+// markets. Students are anonymous Firebase Auth users; a `teamAuthLinks`
+// document is the only proof that a given anonymous session "is" a given
+// team, and the only way that document can be created is by supplying the
+// correct PIN, checked via get() against a team's private/secret doc (a
+// doc no client can ever read directly). Every team-scoped read/write below
+// is gated on either "you are the instructor who owns this market" or
+// "a teamAuthLinks doc exists linking your auth.uid to this team".
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isMarketInstructor(marketId) {
+      return isSignedIn() &&
+        get(/databases/$(database)/documents/markets/$(marketId)).data.instructorUid == request.auth.uid;
+    }
+
+    function isLinkedToTeam(teamId) {
+      return isSignedIn() &&
+        exists(/databases/$(database)/documents/teamAuthLinks/$(request.auth.uid + '_' + teamId));
+    }
+
+    function marketStatus(marketId) {
+      return get(/databases/$(database)/documents/markets/$(marketId)).data.status;
+    }
+
+    function marketCurrentQuarter(marketId) {
+      return get(/databases/$(database)/documents/markets/$(marketId)).data.currentQuarterIndex;
+    }
+
+    match /markets/{marketId} {
+      allow read: if isSignedIn();
+
+      allow create: if isSignedIn() &&
+        request.resource.data.instructorUid == request.auth.uid &&
+        request.resource.data.status == 'forming' &&
+        request.resource.data.teamCount == 0 &&
+        request.resource.data.maxTeams >= 2 && request.resource.data.maxTeams <= 6;
+
+      // Instructor can update anything (lock the market, advance quarters, etc).
+      // Non-instructors may ONLY ever increment teamCount by exactly 1, and only
+      // while the market is still open for team formation — this is what makes
+      // the maxTeams cap enforceable without a Cloud Function (see create_team
+      // flow in the client: a transaction that reads teamCount, aborts locally
+      // if >= maxTeams, then performs the team-doc creates + this increment
+      // together).
+      allow update: if isMarketInstructor(marketId) || (
+        isSignedIn() &&
+        resource.data.status == 'forming' &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['teamCount']) &&
+        request.resource.data.teamCount == resource.data.teamCount + 1
+      );
+
+      allow delete: if false;
+
+      match /teams/{teamId} {
+        // Public-safe fields only (name, createdAt) — readable by anyone
+        // signed in so the "pick your team" dropdown can be populated.
+        allow read: if isSignedIn();
+
+        allow create: if isSignedIn() && marketStatus(marketId) == 'forming';
+        // Firestore treats a create() against an existing doc ID as an
+        // update, which is denied below — this gives free name-uniqueness
+        // per market as long as the client uses a slugified team name as
+        // the doc ID.
+        allow update: if isMarketInstructor(marketId);
+        allow delete: if false;
+
+        match /private/{docId} {
+          // Neither "secret" (the PIN) nor "state" (financial position) is
+          // ever directly readable by a team session. "secret" is only ever
+          // reached via get() from the teamAuthLinks create rule below.
+          // "state" IS readable by the team itself (needed to prefill the
+          // decision form / show current position) and by the instructor.
+          allow read: if docId == 'state' && (isMarketInstructor(marketId) || isLinkedToTeam(teamId));
+
+          // Initial creation of both docs happens once, at team-creation
+          // time, before any teamAuthLinks row exists yet for this brand
+          // new team — so this can't be gated on isLinkedToTeam. It's
+          // gated on the market still being open for formation instead.
+          allow create: if isSignedIn() && marketStatus(marketId) == 'forming';
+
+          // After creation: PIN resets and state updates (post-round) are
+          // instructor-only.
+          allow update: if isMarketInstructor(marketId);
+          allow delete: if false;
+        }
+
+        match /decisions/{quarterIndex} {
+          allow read: if isMarketInstructor(marketId) || isLinkedToTeam(teamId);
+
+          // A team may only write its own current quarter's decision, and
+          // only while the market is active and hasn't already moved past
+          // that quarter — the instant currentQuarterIndex advances, this
+          // quarter's decisions become permanently read-only by rule, not
+          // by convention.
+          allow create, update, delete: if isLinkedToTeam(teamId) &&
+            marketStatus(marketId) == 'active' &&
+            marketCurrentQuarter(marketId) == int(quarterIndex);
+        }
+
+        match /reports/{quarterIndex} {
+          allow read: if isMarketInstructor(marketId) || isLinkedToTeam(teamId);
+          // Written only by the instructor's round-processing batch.
+          allow write: if isMarketInstructor(marketId);
+        }
+      }
+
+      match /rounds/{quarterIndex} {
+        // Market-wide aggregate (avg prices, price limits, market-share
+        // comparison) — deliberately visible to any signed-in participant,
+        // matching the local-file version's existing (unenforced) boundary
+        // for this data. Individual team reports remain strictly isolated
+        // above.
+        allow read: if isSignedIn();
+        allow write: if isMarketInstructor(marketId);
+      }
+    }
+
+    match /teamAuthLinks/{linkId} {
+      allow read: if isSignedIn() && resource.data.authUid == request.auth.uid;
+
+      allow create: if isSignedIn() &&
+        request.resource.data.authUid == request.auth.uid &&
+        linkId == request.auth.uid + '_' + request.resource.data.teamId &&
+        request.resource.data.enteredPin ==
+          get(/databases/$(database)/documents/markets/$(request.resource.data.marketId)/teams/$(request.resource.data.teamId)/private/secret).data.pin;
+
+      allow update, delete: if false;
+    }
+  }
+}

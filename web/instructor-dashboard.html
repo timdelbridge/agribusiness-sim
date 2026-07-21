@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agribusiness Sim — Instructor Dashboard</title>
+<link rel="stylesheet" href="../styles.css">
+</head>
+<body>
+<div class="page" id="app-root">
+  <header class="app-header">
+    <div>
+      <h1>Agribusiness Sim — Instructor Dashboard</h1>
+      <div class="subtitle" id="header-subtitle">Loading…</div>
+    </div>
+    <div class="btn-row no-print" id="header-actions"></div>
+  </header>
+  <div id="view-root"></div>
+</div>
+
+<script src="../simulation-engine.js"></script>
+<script src="../vendor/jspdf.umd.min.js"></script>
+<script src="../vendor/jspdf.plugin.autotable.min.js"></script>
+<script src="../pdf-report.js"></script>
+<script type="module">
+import { FirebaseData } from "./firebase-data.js";
+
+const PRODUCT_LABELS = {
+  completeFeed: 'Complete Feed', concentrateFeed: 'Concentrate Feed',
+  commGradeFert: 'Comm. Grade Fert', customBlendFert: 'Custom Blend Fert',
+};
+const PRODUCTS = FirebaseData.PRODUCTS;
+
+let instructorUser = null;
+let myMarkets = [];
+let market = null;           // currently open market (full doc)
+let teams = [];              // [{id, name}]
+let teamStates = {};         // {[teamId]: state}
+let decisions = {};          // {[teamId]: decision|null} -- live, for the current quarter
+let referenceAvgPrices = null;
+let unsubscribeDecisions = null;
+let unsubscribeTeams = null;
+let unsubscribeMarket = null;
+let pdfStatus = 'idle';      // 'idle' | 'generating' | 'done'
+let lastProcessedQuarterIndex = null;
+
+function escapeHtml(str) {
+  return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+function quarterLabel(idx) { return `Q${(idx % 4) + 1} Year ${Math.floor(idx / 4) + 1}`; }
+function fmtMoney(n) {
+  if (typeof n !== 'number' || !Number.isFinite(n)) return '—';
+  const sign = n < 0 ? '-' : '';
+  return `${sign}$${Math.abs(n).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+}
+
+// ============================================================
+// TOP-LEVEL RENDER
+// ============================================================
+
+function render() {
+  renderHeader();
+  if (!instructorUser) return renderAuthGate();
+  if (!market) return renderMarketPicker();
+  return renderMarketView();
+}
+
+function renderHeader() {
+  const sub = document.getElementById('header-subtitle');
+  const actions = document.getElementById('header-actions');
+  if (!instructorUser) { sub.textContent = 'Sign in to manage your markets.'; actions.innerHTML = ''; return; }
+  sub.textContent = market
+    ? `${market.name} — Join code ${market.joinCode} — ${statusLabel(market)}`
+    : `Signed in as ${instructorUser.email}`;
+  actions.innerHTML = `
+    ${market ? `<button type="button" class="btn-secondary btn-sm" id="btn-back-to-markets">My Markets</button>` : ''}
+    <button type="button" class="btn-secondary btn-sm" id="btn-sign-out">Sign Out</button>
+  `;
+  if (market) document.getElementById('btn-back-to-markets').onclick = () => { detachListeners(); market = null; render(); };
+  document.getElementById('btn-sign-out').onclick = () => FirebaseData.signOutInstructor();
+}
+
+function statusLabel(m) {
+  if (m.status === 'forming') return `Forming (${m.teamCount}/${m.maxTeams} teams)`;
+  if (m.status === 'active') return `${quarterLabel(m.currentQuarterIndex)} (quarter ${m.currentQuarterIndex + 1} of ${m.totalQuarters})`;
+  return 'Complete';
+}
+
+// ============================================================
+// AUTH GATE
+// ============================================================
+
+function renderAuthGate() {
+  document.getElementById('view-root').innerHTML = `
+    <div class="card page--narrow">
+      <h2>Instructor Sign In</h2>
+      <div class="field"><label for="auth-email">Email</label><input type="text" id="auth-email"></div>
+      <div class="field"><label for="auth-password">Password</label><input type="text" id="auth-password" placeholder="min 6 characters"></div>
+      <div class="btn-row">
+        <button type="button" id="btn-sign-in">Sign In</button>
+        <button type="button" class="btn-secondary" id="btn-register">Create Account</button>
+      </div>
+      <p id="auth-error" class="text-danger" style="margin-top:10px;"></p>
+    </div>
+  `;
+  const err = document.getElementById('auth-error');
+  const run = (fn) => async () => {
+    err.textContent = '';
+    try {
+      await fn(document.getElementById('auth-email').value.trim(), document.getElementById('auth-password').value);
+    } catch (e) { err.textContent = e.message; }
+  };
+  document.getElementById('btn-sign-in').onclick = run(FirebaseData.signInInstructor);
+  document.getElementById('btn-register').onclick = run(FirebaseData.registerInstructor);
+}
+
+// ============================================================
+// MARKET PICKER
+// ============================================================
+
+async function renderMarketPicker() {
+  const el = document.getElementById('view-root');
+  el.innerHTML = `<div class="card"><p class="text-muted">Loading your markets…</p></div>`;
+  let loadError = null;
+  try {
+    myMarkets = await FirebaseData.listMyMarkets(instructorUser.uid);
+  } catch (e) {
+    myMarkets = [];
+    // The very first time this query runs, Firestore needs a composite
+    // index and rejects with a failed-precondition error containing a
+    // direct "create it here" link -- surface that link instead of hiding it.
+    loadError = e.message || String(e);
+  }
+
+  el.innerHTML = `
+    <div class="card">
+      <h2>My Markets</h2>
+      ${loadError ? `<p class="text-danger">Could not load your markets: ${escapeHtml(loadError)}</p>` : ''}
+      ${!loadError && myMarkets.length === 0 ? '<p class="text-muted">No markets yet — create one below.</p>' : myMarkets.map(m => `
+        <div class="roster-row">
+          <div><span class="team-name">${escapeHtml(m.name)}</span> <span class="text-muted">(${escapeHtml(m.joinCode)})</span></div>
+          <div><span class="badge badge--not-submitted">${statusLabel(m)}</span>
+            <button type="button" class="btn-secondary btn-sm" data-open-market="${m.id}">Open</button></div>
+        </div>
+      `).join('')}
+    </div>
+    <div class="card">
+      <h2>Create a New Market</h2>
+      <div class="field"><label for="market-name">Market Name</label><input type="text" id="market-name" placeholder="e.g. Econ 301, Section 2"></div>
+      <div class="grid grid--2">
+        <div class="field">
+          <label for="max-teams">Number of Teams (2–6)</label>
+          <input type="number" id="max-teams" min="2" max="6" value="4">
+        </div>
+        <fieldset>
+          <legend>Interest Rate Scenario</legend>
+          <div class="radio-row">
+            <label><input type="radio" name="scenario" value="A" checked> A</label>
+            <label><input type="radio" name="scenario" value="B"> B</label>
+            <label><input type="radio" name="scenario" value="C"> C</label>
+          </div>
+        </fieldset>
+      </div>
+      <button type="button" id="btn-create-market">Create Market</button>
+      <p id="create-error" class="text-danger" style="margin-top:10px;"></p>
+    </div>
+  `;
+
+  document.querySelectorAll('[data-open-market]').forEach(btn => {
+    btn.onclick = () => openMarket(btn.getAttribute('data-open-market'));
+  });
+  document.getElementById('btn-create-market').onclick = async () => {
+    const errEl = document.getElementById('create-error');
+    errEl.textContent = '';
+    try {
+      const name = document.getElementById('market-name').value.trim() || 'Untitled Market';
+      const maxTeams = Math.min(6, Math.max(2, parseInt(document.getElementById('max-teams').value, 10) || 4));
+      const interestScenario = document.querySelector('input[name="scenario"]:checked').value;
+      const { marketId } = await FirebaseData.createMarket({ name, interestScenario, maxTeams });
+      await openMarket(marketId);
+    } catch (e) { errEl.textContent = e.message; }
+  };
+}
+
+async function openMarket(marketId) {
+  market = await FirebaseData.getMarket(marketId);
+  lastProcessedQuarterIndex = null;
+  pdfStatus = 'idle';
+  render();
+  attachMarketListeners();
+}
+
+// ============================================================
+// MARKET VIEW (forming / active / completed)
+// ============================================================
+
+function detachListeners() {
+  if (unsubscribeTeams) { unsubscribeTeams(); unsubscribeTeams = null; }
+  if (unsubscribeDecisions) { unsubscribeDecisions(); unsubscribeDecisions = null; }
+  if (unsubscribeMarket) { unsubscribeMarket(); unsubscribeMarket = null; }
+}
+
+function attachMarketListeners() {
+  detachListeners();
+  unsubscribeMarket = FirebaseData.listenToMarket(market.id, (m) => {
+    if (!m) return;
+    const statusChanged = market && market.status !== m.status;
+    const quarterChanged = market && market.currentQuarterIndex !== m.currentQuarterIndex;
+    market = m;
+    if (statusChanged || quarterChanged) { setupForCurrentState(); }
+    renderHeader();
+    if (market.status === 'forming') renderFormingBody();
+  });
+  setupForCurrentState();
+}
+
+async function setupForCurrentState() {
+  if (market.status === 'forming') {
+    unsubscribeTeams = FirebaseData.listenToTeams(market.id, (t) => { teams = t; renderFormingBody(); });
+    render();
+  } else if (market.status === 'active') {
+    await loadActiveQuarter();
+  } else {
+    render();
+  }
+}
+
+async function loadActiveQuarter() {
+  teams = await FirebaseData.listTeams(market.id);
+  teamStates = await FirebaseData.fetchAllTeamStates(market.id, teams);
+  referenceAvgPrices = market.currentQuarterIndex === 0
+    ? { ...SimEngine.STARTING_PRICES }
+    : (await FirebaseData.fetchMarketRound(market.id, market.currentQuarterIndex - 1)).currentAvgPrices;
+  decisions = {};
+  teams.forEach(t => decisions[t.id] = null);
+
+  if (unsubscribeDecisions) unsubscribeDecisions();
+  unsubscribeDecisions = FirebaseData.listenToRoundDecisions(market.id, teams, market.currentQuarterIndex, (teamId, decision) => {
+    decisions[teamId] = decision;
+    renderActiveBody();
+  });
+  render();
+}
+
+function renderMarketView() {
+  const el = document.getElementById('view-root');
+  if (market.status === 'forming') { el.innerHTML = '<div id="forming-body"></div>'; renderFormingBody(); }
+  else if (market.status === 'active') { el.innerHTML = '<div id="active-body"></div><div id="history-body"></div>'; renderActiveBody(); renderHistory(); }
+  else { el.innerHTML = '<div id="completed-body"></div><div id="history-body"></div>'; renderCompletedBody(); renderHistory(); }
+}
+
+// --- FORMING ---
+
+function renderFormingBody() {
+  const el = document.getElementById('forming-body');
+  if (!el) return;
+  el.innerHTML = `
+    <div class="card">
+      <h2>Team Formation</h2>
+      <p>Share this join code with your students: <strong style="font-size:1.4em; letter-spacing:0.1em;">${escapeHtml(market.joinCode)}</strong></p>
+      <p class="text-muted">${teams.length} of ${market.maxTeams} team slots filled.</p>
+      <div style="margin:16px 0;">
+        ${teams.length === 0 ? '<p class="text-muted">No teams yet.</p>' : teams.map(t => `
+          <div class="roster-row"><span class="team-name">${escapeHtml(t.name)}</span></div>
+        `).join('')}
+      </div>
+      <button type="button" id="btn-lock-market" ${teams.length < 2 ? 'disabled' : ''}>Lock Teams &amp; Start Game</button>
+      ${teams.length < 2 ? '<p class="field-hint">Need at least 2 teams before starting.</p>' : ''}
+    </div>
+  `;
+  document.getElementById('btn-lock-market').onclick = async () => {
+    await FirebaseData.lockMarket(market.id);
+  };
+}
+
+// --- ACTIVE (decision collection + processing) ---
+
+function getDisplayValidation() {
+  const results = {};
+  teams.forEach(t => {
+    const decision = decisions[t.id];
+    if (!decision) return;
+    results[t.id] = SimEngine.validateDecision(decision, teamStates[t.id], referenceAvgPrices);
+  });
+  return results;
+}
+
+function renderActiveBody() {
+  const el = document.getElementById('active-body');
+  if (!el) return;
+  const validation = getDisplayValidation();
+  const submittedCount = teams.filter(t => !!decisions[t.id]).length;
+  const allIn = teams.every(t => !!decisions[t.id]);
+  const hasErrors = allIn && Object.values(validation).some(v => v.errors.length > 0);
+
+  if (pdfStatus === 'generating') {
+    el.innerHTML = `<div class="card"><h2>Processing…</h2><p class="text-muted">Generating PDF reports for all teams — files will download automatically.</p></div>`;
+    return;
+  }
+
+  el.innerHTML = `
+    <div class="card">
+      <h2>Collect Team Decisions — ${quarterLabel(market.currentQuarterIndex)}</h2>
+      <p class="text-muted">${submittedCount} of ${teams.length} teams submitted. Updates live as teams submit — no action needed to refresh.</p>
+      <div style="margin-top:16px;">
+        ${teams.map(t => renderRosterRow(t, decisions[t.id], validation[t.id])).join('')}
+      </div>
+      <div class="btn-row" style="margin-top:16px;">
+        ${hasErrors ? `<label style="display:flex; align-items:center; gap:8px; font-weight:400;">
+          <input type="checkbox" id="chk-override-errors"> Process anyway despite flagged errors above</label>` : ''}
+        <button type="button" id="btn-process-quarter" ${allIn ? '' : 'disabled'}>Approve &amp; Process Quarter</button>
+      </div>
+    </div>
+    ${lastProcessedQuarterIndex !== null ? renderResultsCard(lastProcessedQuarterIndex) : ''}
+  `;
+
+  const processBtn = document.getElementById('btn-process-quarter');
+  if (processBtn) processBtn.onclick = handleProcessQuarter;
+  wireReportButtons();
+}
+
+function renderRosterRow(team, decision, validation) {
+  let badgeClass = 'badge--not-submitted', badgeText = 'Not Submitted';
+  if (decision) {
+    if (validation && validation.errors.length > 0) { badgeClass = 'badge--error'; badgeText = `${validation.errors.length} Error(s)`; }
+    else if (validation && validation.warnings.length > 0) { badgeClass = 'badge--warning'; badgeText = `${validation.warnings.length} Warning(s)`; }
+    else { badgeClass = 'badge--clean'; badgeText = 'Ready'; }
+  }
+  const messages = validation ? [
+    ...validation.errors.map(m => ({ text: m, cls: 'is-error' })),
+    ...validation.warnings.map(m => ({ text: m, cls: 'is-warning' })),
+  ] : [];
+  return `
+    <div class="roster-row">
+      <div style="flex:1;">
+        <span class="team-name">${escapeHtml(team.name)}</span>
+        ${messages.length > 0 ? `<ul class="message-list">${messages.map(m => `<li class="${m.cls}">${escapeHtml(m.text)}</li>`).join('')}</ul>` : ''}
+      </div>
+      <span class="badge ${badgeClass}">${badgeText}</span>
+    </div>
+  `;
+}
+
+async function handleProcessQuarter() {
+  const validation = getDisplayValidation();
+  const hasErrors = Object.values(validation).some(v => v.errors.length > 0);
+  if (hasErrors) {
+    const override = document.getElementById('chk-override-errors');
+    if (!override || !override.checked) { alert('Resolve the flagged errors, or check "Process anyway" to override.'); return; }
+  }
+  const quarterIndex = market.currentQuarterIndex;
+  pdfStatus = 'generating';
+  renderActiveBody();
+  try {
+    const { teamReports, marketReport } = await FirebaseData.processQuarterAndCommit(market, teams, teamStates, decisions, quarterIndex);
+    await generateAllPdfs(quarterIndex, teamReports, marketReport);
+    lastProcessedQuarterIndex = quarterIndex;
+    pdfStatus = 'done';
+    // listenToMarket's callback will pick up the new currentQuarterIndex/status and reload.
+  } catch (e) {
+    pdfStatus = 'idle';
+    alert(`Could not process quarter: ${e.message}`);
+    renderActiveBody();
+  }
+}
+
+async function generateAllPdfs(quarterIndex, teamReports, marketReport) {
+  const qLabel = quarterLabel(quarterIndex);
+  for (let i = 0; i < teams.length; i++) {
+    const payload = { type: 'team', teamName: teams[i].name, quarterLabel: qLabel, interestScenario: market.interestScenario, report: teamReports[i] };
+    PdfReports.downloadTeamReportPdf(payload);
+    await new Promise(r => setTimeout(r, 200));
+  }
+  const teamReportsById = Object.fromEntries(teams.map((t, i) => [t.id, teamReports[i]]));
+  PdfReports.downloadInstructorSummaryPdf({
+    type: 'instructor-summary', quarterLabel: qLabel, interestScenario: market.interestScenario,
+    teams, marketReport, teamReports: teamReportsById,
+  });
+}
+
+function renderResultsCard(quarterIndex) {
+  return `
+    <div class="card">
+      <h2>Quarter Processed: ${escapeHtml(quarterLabel(quarterIndex))}</h2>
+      <p class="text-success">PDF reports downloaded for every team, plus the instructor summary.</p>
+      <div class="btn-row">
+        ${teams.map(t => `
+          <button type="button" class="btn-secondary btn-sm" data-pdf-team="${t.id}" data-quarter="${quarterIndex}">Re-download ${escapeHtml(t.name)} PDF</button>
+          <a class="btn btn-secondary btn-sm" href="report-view.html?market=${encodeURIComponent(market.id)}&team=${encodeURIComponent(t.id)}&quarter=${quarterIndex}" target="_blank">View ${escapeHtml(t.name)}</a>
+        `).join('')}
+        <button type="button" class="btn-secondary btn-sm" data-pdf-summary data-quarter="${quarterIndex}">Re-download Summary PDF</button>
+        <a class="btn btn-secondary btn-sm" href="report-view.html?market=${encodeURIComponent(market.id)}&quarter=${quarterIndex}" target="_blank">View Summary</a>
+      </div>
+    </div>
+  `;
+}
+
+// --- COMPLETED ---
+
+function renderCompletedBody() {
+  const el = document.getElementById('completed-body');
+  el.innerHTML = `<div class="card"><h2>Game Complete</h2><p>All ${market.totalQuarters} quarters have been processed. Reports remain available below.</p></div>`;
+}
+
+// --- HISTORY (past quarters, lazy-loaded PDF re-download) ---
+
+function renderHistory() {
+  const el = document.getElementById('history-body');
+  if (!el || market.currentQuarterIndex === 0) { if (el) el.innerHTML = ''; return; }
+  const quarters = [];
+  for (let q = market.currentQuarterIndex - 1; q >= 0; q--) quarters.push(q);
+  el.innerHTML = `
+    <div class="card">
+      <h2>Quarter History</h2>
+      ${quarters.map(q => `
+        <div class="roster-row">
+          <div><strong>${escapeHtml(quarterLabel(q))}</strong></div>
+          <div class="btn-row">
+            ${teams.map(t => `<button type="button" class="btn-secondary btn-sm" data-pdf-team="${t.id}" data-quarter="${q}">${escapeHtml(t.name)} PDF</button>`).join('')}
+            <button type="button" class="btn-secondary btn-sm" data-pdf-summary data-quarter="${q}">Summary PDF</button>
+            <a class="btn btn-secondary btn-sm" href="report-view.html?market=${encodeURIComponent(market.id)}&quarter=${q}" target="_blank">View Summary</a>
+          </div>
+        </div>
+      `).join('')}
+    </div>
+  `;
+  wireReportButtons();
+}
+
+function wireReportButtons() {
+  document.querySelectorAll('[data-pdf-team]').forEach(btn => {
+    btn.onclick = async () => {
+      const teamId = btn.getAttribute('data-pdf-team');
+      const quarterIndex = parseInt(btn.getAttribute('data-quarter'), 10);
+      const team = teams.find(t => t.id === teamId);
+      const report = await FirebaseData.fetchTeamReport(market.id, teamId, quarterIndex);
+      PdfReports.downloadTeamReportPdf({ type: 'team', teamName: team.name, quarterLabel: quarterLabel(quarterIndex), interestScenario: market.interestScenario, report });
+    };
+  });
+  document.querySelectorAll('[data-pdf-summary]').forEach(btn => {
+    btn.onclick = async () => {
+      const quarterIndex = parseInt(btn.getAttribute('data-quarter'), 10);
+      const marketReport = await FirebaseData.fetchMarketRound(market.id, quarterIndex);
+      const teamReportsById = {};
+      for (const t of teams) teamReportsById[t.id] = await FirebaseData.fetchTeamReport(market.id, t.id, quarterIndex);
+      PdfReports.downloadInstructorSummaryPdf({
+        type: 'instructor-summary', quarterLabel: quarterLabel(quarterIndex), interestScenario: market.interestScenario,
+        teams, marketReport, teamReports: teamReportsById,
+      });
+    };
+  });
+}
+
+// ============================================================
+// BOOT
+// ============================================================
+
+FirebaseData.onInstructorAuthChanged((user) => {
+  instructorUser = user;
+  market = null;
+  detachListeners();
+  render();
+});
+</script>
+</body>
+</html>
