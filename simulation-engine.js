@@ -133,22 +133,36 @@ const ANNUAL_GROWTH_RATES = {
 // ============================================================
 
 /**
- * Price elasticity coefficients
- * Ordering per instructor guidance (most to least inelastic):
- *   1. Concentrate feed    (most inelastic — specialty product, hard to substitute)
- *   2. Complete feed       (moderately inelastic — commodity but still essential)
- *   3. Custom blend fert   (moderately elastic — tailored but alternatives exist)
- *   4. Comm grade fert     (most elastic — commodity, easy to substitute)
+ * Price elasticity coefficients (score-model form, i.e. the k used in
+ * `priceEffect = 1 + (-priceDiff * |k|)` below — not a classical log-log
+ * elasticity, though the two are close in magnitude at this price range).
  *
- * Values are negative (price up → demand down).
- * Smaller absolute value = less responsive to price = more inelastic.
- * These can be tuned if simulation behavior doesn't match expectations.
+ * Estimated from real historical gameplay data (AGB322, Fall 2021, 4 market
+ * areas x ~7 periods x 5 teams) via a within-market-period fixed-effects
+ * regression of each team's log market share on its price deviation from
+ * the period average, matching the exact share-allocation formula this
+ * engine uses. All four coefficients are highly significant (t = -5 to
+ * -7.7). Ordering (most to least inelastic):
+ *   1. Complete feed       (~10.8)
+ *   2. Comm grade fert     (~10.9 — statistically indistinguishable from Complete feed)
+ *   3. Concentrate feed    (~13.1)
+ *   4. Custom blend fert   (~14.8, most elastic)
+ *
+ * This is a large upward revision from an earlier guessed set (roughly
+ * -0.8 to -1.8): with only a $4 legal price band (~1-2% of price level),
+ * a much steeper coefficient is needed for price choice to meaningfully
+ * move market share at all, which is exactly the pattern the data shows.
+ *
+ * Cross-price and advertising elasticities were also estimated from the
+ * same data but came back statistically insignificant (t < 1.8, inconsistent
+ * signs), so CROSS_ELASTICITY_FEED/FERT and ADVERTISING_ELASTICITY below are
+ * intentionally left at their prior guessed values rather than replaced.
  */
 const PRICE_ELASTICITY = {
-  concentrateFeed: -0.8,   // most inelastic
-  completeFeed:    -1.1,   // second
-  customBlendFert: -1.4,   // third
-  commGradeFert:   -1.8,   // most elastic
+  completeFeed:    -10.8,  // most inelastic
+  commGradeFert:   -10.9,
+  concentrateFeed: -13.1,
+  customBlendFert: -14.8,  // most elastic
 };
 
 /**
